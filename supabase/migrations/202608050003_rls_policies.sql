@@ -69,9 +69,14 @@ alter table generation_jobs enable row level security;
 create policy generation_jobs_owner on generation_jobs
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
--- Worker 服务角色专用策略：读取 queued/cancel_requested 任务
--- （Worker 以 service_role 运行，绕过 RLS；如需最小权限可改为 security definer 函数）
+-- Worker 专用策略（终审返修 #1：原策略未限定角色，普通用户可更新他人任务）
+-- 仅 tapflow_worker 角色可读取/认领队列任务；普通用户（authenticated）走 generation_jobs_owner
+create policy generation_jobs_worker_read on generation_jobs
+  for select to tapflow_worker
+  using (status in ('queued','running','cancel_requested'));
+
 create policy generation_jobs_worker_claim on generation_jobs
-  for update using (status in ('queued','cancel_requested'));
+  for update to tapflow_worker
+  using (status in ('queued','cancel_requested'));
 
 commit;

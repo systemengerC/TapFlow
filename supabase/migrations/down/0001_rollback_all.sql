@@ -6,6 +6,7 @@
 begin;
 
 -- migration 003: RLS
+drop policy if exists generation_jobs_worker_read on generation_jobs;
 drop policy if exists generation_jobs_worker_claim on generation_jobs;
 drop policy if exists generation_jobs_owner on generation_jobs;
 drop policy if exists upload_sessions_owner on upload_sessions;
@@ -44,5 +45,8 @@ drop table if exists projects;
 
 -- buckets（保留，避免误删用户数据；如需删除取消注释）
 -- delete from storage.buckets where id in ('uploads','generated','thumbs');
+
+-- 自定义角色（依赖其策略/授权已随表/函数删除，可安全 drop）
+drop role if exists tapflow_worker;
 
 commit;

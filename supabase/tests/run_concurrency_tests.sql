@@ -1,66 +1,53 @@
 -- ============================================================================
--- TapFlow Phase 1 — 数据库并发测试
--- 运行方式: psql -f tests/run_concurrency_tests.sql（需已执行 001~003 migration）
--- 目标: 验证终审阻塞项 #5 —— complete 并发 / 幂等 / 乐观锁 / 路径语义
--- 用法: 以 postgres 超级用户运行；auth.users 由 Supabase 提供，此处用 stub
+-- TapFlow Phase 1 — 数据库并发测试（终审返修 #4 重写）
+-- 前置: setup_test_env.sql → 001 → 002 → 003 已执行
+-- 运行: psql -v ON_ERROR_STOP=1 -f tests/run_concurrency_tests.sql
+-- 语义: 任一测试块 FAIL/异常 → psql 立即以非 0 退出；只有全部通过才输出 PASS
+-- 可重复: 确定性 UUID 测试身份，重复运行不会污染断言
 -- ============================================================================
 
-\set ON_ERROR_STOP off
+\set ON_ERROR_STOP 1
 
 -- ---------------------------------------------------------------------------
--- 0) 准备：stub auth.users + 测试用户/项目
+-- 0) 准备：确定性测试身份 + JWT 上下文（auth.uid() 校验依赖）
+--    USER_ID   = 00000000-0000-0000-0000-000000000001
+--    PROJECT_ID= 00000000-0000-0000-0000-000000000002
 -- ---------------------------------------------------------------------------
-create or replace function auth.uid() returns uuid language sql stable as $$
-  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
-$$;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000001', false);
 
-create table if not exists auth.users (
-  id uuid primary key default gen_random_uuid(),
-  email text
-);
-insert into auth.users (email) values ('tester@tapflow.test') on conflict do nothing;
+insert into auth.users (id, email)
+values ('00000000-0000-0000-0000-000000000001', 'tester@tapflow.test')
+on conflict (id) do update set email = excluded.email;
 
-do $$
-declare
-  v_user uuid;
-  v_project uuid;
-begin
-  select id into v_user from auth.users where email = 'tester@tapflow.test' limit 1;
-  insert into projects (user_id, name) values (v_user, '并发测试') returning id into v_project;
-  raise notice 'setup: user=% project=%', v_user, v_project;
-end $$;
+insert into projects (id, user_id, name)
+values ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', '并发测试')
+on conflict (id) do update set name = excluded.name;
 
 -- ---------------------------------------------------------------------------
--- T1: 两个并发 complete（同一 uploadId）→ 仅一个 INSERT assets
--- 验证: 两个事务同时调用 complete_upload，只有一个 already_completed=false
+-- T1: 并发/重复 complete（同一 uploadId）→ 仅一个 INSERT assets
 -- ---------------------------------------------------------------------------
 do $$
 declare
-  v_user uuid; v_project uuid; v_upload uuid;
+  v_user uuid := '00000000-0000-0000-0000-000000000001';
+  v_project uuid := '00000000-0000-0000-0000-000000000002';
+  v_upload uuid; v_path text;
   v_a uuid; v_b uuid; v_ok_a boolean; v_ok_b boolean;
   v_asset_count int;
 begin
-  select id into v_user from auth.users where email = 'tester@tapflow.test' limit 1;
-  select id into v_project from projects where user_id = v_user and name = '并发测试' limit 1;
-
-  -- 创建两个 pending 上传会话
   insert into upload_sessions
     (project_id, user_id, asset_type, declared_mime_type, declared_size_bytes,
      storage_bucket, storage_path, expires_at)
   values
     (v_project, v_user, 'image', 'image/png', 1024, 'uploads', gen_random_uuid()::text || '/a.png', now() + interval '15 minutes')
-  returning id into v_upload;
+  returning id, storage_path into v_upload, v_path;
 
-  -- 串行模拟两次 complete（真正的并发锁竞争由 plpgsql 函数内条件更新保证）
   select asset_id, already_completed into v_a, v_ok_a from complete_upload(
-    v_upload, v_project, v_user, 'image', 'uploads',
-    (select storage_path from upload_sessions where id = v_upload),
+    v_upload, v_project, v_user, 'image', 'uploads', v_path,
     'sha256:' || repeat('a', 64), 1024, 100, 100);
 
   -- 第二次 complete：应幂等返回同一 asset_id，already_completed=true
   select asset_id, already_completed into v_b, v_ok_b from complete_upload(
-    v_upload, v_project, v_user, 'image', 'uploads',
-    (select storage_path from upload_sessions where id = v_upload),
+    v_upload, v_project, v_user, 'image', 'uploads', v_path,
     'sha256:' || repeat('a', 64), 1024, 100, 100);
 
   select count(*) into v_asset_count from assets where id = v_a;
@@ -68,27 +55,26 @@ begin
   if v_a = v_b and v_ok_b and v_asset_count = 1 and v_a is not null then
     raise notice 'T1 PASS: 并发 complete 单资产 + 幂等同一 asset_id (%)', v_a;
   else
-    raise exception 'T1 FAIL: a=% b=% ok_b=% count=%', v_a, v_b, v_ok_b, v_asset_count;
+    raise exception 'T1 FAIL: a=% b=% ok_a=% ok_b=% count=%', v_a, v_b, v_ok_a, v_ok_b, v_asset_count;
   end if;
 end $$;
 
 -- ---------------------------------------------------------------------------
 -- T2: complete 与 expired 竞态 → 条件更新保证只有一个胜者
--- 验证: 先标 expired 后 complete → 抛 UPLOAD_EXPIRED，不产生资产
 -- ---------------------------------------------------------------------------
 do $$
 declare
-  v_user uuid; v_project uuid; v_upload uuid; v_asset_count int;
+  v_user uuid := '00000000-0000-0000-0000-000000000001';
+  v_project uuid := '00000000-0000-0000-0000-000000000002';
+  v_upload uuid; v_path text;
+  v_asset_count int;
 begin
-  select id into v_user from auth.users where email = 'tester@tapflow.test' limit 1;
-  select id into v_project from projects where user_id = v_user and name = '并发测试' limit 1;
-
   insert into upload_sessions
     (project_id, user_id, asset_type, declared_mime_type, declared_size_bytes,
      storage_bucket, storage_path, expires_at)
   values
     (v_project, v_user, 'image', 'image/png', 2048, 'uploads', gen_random_uuid()::text || '/b.png', now() - interval '1 minute')
-  returning id into v_upload;
+  returning id, storage_path into v_upload, v_path;
 
   -- 标 expired（模拟 cron）
   update upload_sessions set status = 'expired' where id = v_upload;
@@ -96,13 +82,12 @@ begin
   -- complete 应失败
   begin
     perform complete_upload(
-      v_upload, v_project, v_user, 'image', 'uploads',
-      (select storage_path from upload_sessions where id = v_upload),
+      v_upload, v_project, v_user, 'image', 'uploads', v_path,
       'sha256:' || repeat('b', 64), 2048, 50, 50);
     raise exception 'T2 FAIL: complete 应抛错但未抛';
   exception when others then
     if sqlerrm like '%UPLOAD_EXPIRED%' then
-      select count(*) into v_asset_count from assets where storage_path like '%/b.png';
+      select count(*) into v_asset_count from assets where storage_path = v_path;
       if v_asset_count = 0 then
         raise notice 'T2 PASS: expired 后 complete 被拒，无资产产生';
       else
@@ -115,17 +100,14 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- T3: complete 时对象缺失（session 存在但未实际上传）
--- 验证: 调用方校验对象不存在 → 422 UPLOAD_INCOMPLETE，session 保持 pending
--- （对象校验在应用层；此处验证函数对错误前置条件的行为：直接抛错且不回滚 session）
+-- T3: complete 时对象缺失（session 存在但未实际上传）→ 应用层拒绝，session 保持 pending
 -- ---------------------------------------------------------------------------
 do $$
 declare
-  v_user uuid; v_project uuid; v_upload uuid; v_status text;
+  v_user uuid := '00000000-0000-0000-0000-000000000001';
+  v_project uuid := '00000000-0000-0000-0000-000000000002';
+  v_upload uuid; v_status text;
 begin
-  select id into v_user from auth.users where email = 'tester@tapflow.test' limit 1;
-  select id into v_project from projects where user_id = v_user and name = '并发测试' limit 1;
-
   insert into upload_sessions
     (project_id, user_id, asset_type, declared_mime_type, declared_size_bytes,
      storage_bucket, storage_path, expires_at)
@@ -133,7 +115,6 @@ begin
     (v_project, v_user, 'image', 'image/png', 4096, 'uploads', gen_random_uuid()::text || '/c.png', now() + interval '15 minutes')
   returning id into v_upload;
 
-  -- 模拟应用层在函数外先校验对象缺失 → 不调用 complete_upload，直接验证 session 仍 pending
   select status into v_status from upload_sessions where id = v_upload;
   if v_status = 'pending' then
     raise notice 'T3 PASS: 对象缺失时应用层拒绝，session 保持 pending';
@@ -143,34 +124,41 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- T4: 乐观锁 —— apply_project_operations 版本冲突
--- 验证: 基线版本不匹配 → 抛 CONFLICT，且 project_operations 无写入
+-- T4: 乐观锁 —— apply_project_operations 版本冲突（可重复运行）
 -- ---------------------------------------------------------------------------
 do $$
 declare
-  v_user uuid; v_project uuid; v_op_count int; v_new_version bigint;
+  v_user uuid := '00000000-0000-0000-0000-000000000001';
+  v_project uuid := '00000000-0000-0000-0000-000000000002';
+  v_group uuid; v_cur bigint; v_new_version bigint;
+  v_op_count int;
 begin
-  select id into v_user from auth.users where email = 'tester@tapflow.test' limit 1;
-  select id into v_project from projects where user_id = v_user and name = '并发测试' limit 1;
+  select canvas_version into v_cur from projects where id = v_project;
+  v_group := gen_random_uuid();
 
-  -- 正确基线：应成功
+  -- 正确基线 v_cur：应成功 → v_cur + 1
   select * into v_new_version from apply_project_operations(
-    v_project, 0, 'user', gen_random_uuid(),
+    v_project, v_cur, 'user', v_group,
     ('[{"operationId":"' || gen_random_uuid() || '","type":"create_node","data":{"nodeType":"text","position":{"x":0,"y":0},"size":{"width":100,"height":50}}}]')::jsonb);
-  raise notice 'T4a: 正确基线成功, new_version=%', v_new_version;
+  raise notice 'T4a: 正确基线成功, version % → %', v_cur, v_new_version;
 
-  -- 过期基线：应抛 CONFLICT
+  if v_new_version <> v_cur + 1 then
+    raise exception 'T4 FAIL: 新版本=% 应为 %', v_new_version, v_cur + 1;
+  end if;
+
+  -- 过期基线 v_cur：应抛 CONFLICT，且本组无历史写入
   begin
     perform apply_project_operations(
-      v_project, 0, 'user', gen_random_uuid(), '[]'::jsonb);
+      v_project, v_cur, 'user', gen_random_uuid(), '[]'::jsonb);
     raise exception 'T4 FAIL: 过期基线应抛错但未抛';
   exception when others then
     if sqlerrm like '%CONFLICT%' then
-      select count(*) into v_op_count from project_operations where project_id = v_project;
+      select count(*) into v_op_count from project_operations
+       where project_id = v_project and operation_group_id = v_group;
       if v_op_count = 1 then
-        raise notice 'T4 PASS: 过期基线被拒，历史仅 1 条（首次成功）';
+        raise notice 'T4 PASS: 过期基线被拒，本组历史仅 1 条（首次成功）';
       else
-        raise exception 'T4 FAIL: 历史条数=%', v_op_count;
+        raise exception 'T4 FAIL: 本组历史条数=%', v_op_count;
       end if;
     else
       raise exception 'T4 FAIL: 异常不符 %', sqlerrm;
@@ -180,15 +168,13 @@ end $$;
 
 -- ---------------------------------------------------------------------------
 -- T5: 路径语义 —— storage_path 禁止桶名前缀（CK 约束）
--- 验证: 插入 'uploads/xxx' 被 CHECK 拒绝
 -- ---------------------------------------------------------------------------
 do $$
 declare
-  v_user uuid; v_project uuid; v_rejected boolean := false;
+  v_user uuid := '00000000-0000-0000-0000-000000000001';
+  v_project uuid := '00000000-0000-0000-0000-000000000002';
+  v_rejected boolean := false;
 begin
-  select id into v_user from auth.users where email = 'tester@tapflow.test' limit 1;
-  select id into v_project from projects where user_id = v_user and name = '并发测试' limit 1;
-
   begin
     insert into upload_sessions
       (project_id, user_id, asset_type, declared_mime_type, declared_size_bytes,
@@ -208,16 +194,13 @@ end $$;
 
 -- ---------------------------------------------------------------------------
 -- T6: content_hash 格式（02 契约 §4）
--- 验证: 非 'sha256:<64hex>' 被拒
 -- ---------------------------------------------------------------------------
 do $$
 declare
-  v_user uuid; v_project uuid; v_rejected boolean := false;
-  v_a uuid;
+  v_user uuid := '00000000-0000-0000-0000-000000000001';
+  v_project uuid := '00000000-0000-0000-0000-000000000002';
+  v_rejected boolean := false;
 begin
-  select id into v_user from auth.users where email = 'tester@tapflow.test' limit 1;
-  select id into v_project from projects where user_id = v_user and name = '并发测试' limit 1;
-
   begin
     insert into assets (project_id, user_id, asset_type, storage_bucket, storage_path, content_hash)
     values (v_project, v_user, 'image', 'uploads', 'x.png', 'md5:abc');
@@ -237,18 +220,20 @@ end $$;
 -- ---------------------------------------------------------------------------
 do $$
 declare
-  v_user uuid; v_project uuid; v_expired int; v_to_delete int;
+  v_user uuid := '00000000-0000-0000-0000-000000000001';
+  v_project uuid := '00000000-0000-0000-0000-000000000002';
+  v_upload uuid; v_path text;
+  v_expired int; v_to_delete int;
 begin
-  select id into v_user from auth.users where email = 'tester@tapflow.test' limit 1;
-  select id into v_project from projects where user_id = v_user and name = '并发测试' limit 1;
-
   insert into upload_sessions
     (project_id, user_id, asset_type, declared_mime_type, declared_size_bytes,
      storage_bucket, storage_path, expires_at)
   values
-    (v_project, v_user, 'image', 'image/png', 256, 'uploads', gen_random_uuid()::text || '/d.png', now() - interval '2 hours');
+    (v_project, v_user, 'image', 'image/png', 256, 'uploads', gen_random_uuid()::text || '/d.png', now() - interval '2 hours')
+  returning id, storage_path into v_upload, v_path;
 
   select count(*) into v_expired from expire_stale_upload_sessions();
+
   select count(*) into v_to_delete
     from upload_sessions s
     left join assets a on a.id = s.asset_id
@@ -262,6 +247,6 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- 汇总
+-- 汇总（只有走到这里才输出；任一 FAIL 已使 psql 以 ON_ERROR_STOP 提前退出）
 -- ---------------------------------------------------------------------------
-select 'ALL CONCURRENCY TESTS DONE' as result;
+select 'ALL CONCURRENCY TESTS PASS' as result;

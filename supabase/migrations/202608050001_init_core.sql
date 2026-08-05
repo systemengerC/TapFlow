@@ -191,11 +191,19 @@ create or replace function apply_project_operations(
 ) returns bigint  -- 返回新 canvas_version
 language plpgsql
 security definer
+set search_path = public, pg_temp  -- 终审返修 #2：固定 search_path，防对象劫持
 as $$
 declare
   v_new_version bigint;
   v_op jsonb;
 begin
+  -- 0) 归属校验（终审返修 #3）：登录用户只能操作自己的项目；
+  --    service_role/worker（无 JWT 上下文，auth.uid()=null）跳过，由应用层授权
+  if auth.uid() is not null
+     and not exists (select 1 from projects where id = p_project_id and user_id = auth.uid()) then
+    raise exception 'FORBIDDEN: project does not belong to caller' using errcode = '42501';
+  end if;
+
   -- 1) 乐观锁：版本匹配才递增，否则 0 行 → 抛 409 语义错误
   update projects
      set canvas_version = canvas_version + 1
@@ -216,6 +224,25 @@ begin
   return v_new_version;
 end;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- 终审返修 #1/#3：角色引导 + 执行权限边界
+--   - tapflow_worker: 自定义 Worker 专用角色（NOLOGIN，Supabase 无内置）
+--   - 所有 SECURITY DEFINER 函数: REVOKE PUBLIC → 只授权 trusted 角色
+--   - authenticated / service_role 由 Supabase 内置；本地验证环境在
+--     tests/setup_test_env.sql 中创建（角色不存在时 grant 会失败，需先建）
+-- ---------------------------------------------------------------------------
+do $$
+begin
+  if not exists (select from pg_roles where rolname = 'tapflow_worker') then
+    create role tapflow_worker nologin;
+  end if;
+end
+$$;
+
+revoke execute on function apply_project_operations(uuid, bigint, text, uuid, jsonb) from public;
+grant execute on function apply_project_operations(uuid, bigint, text, uuid, jsonb)
+  to authenticated, service_role, tapflow_worker;
 
 -- ---------------------------------------------------------------------------
 -- 未决项 #3 落地：存储桶（Service Role 执行；RLS 见 migration 003）

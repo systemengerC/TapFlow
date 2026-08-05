@@ -52,11 +52,18 @@ create or replace function complete_upload(
 ) returns table (asset_id uuid, already_completed boolean)
 language plpgsql
 security definer
+set search_path = public, pg_temp  -- 终审返修 #2：固定 search_path
 as $$
 declare
   v_new_asset_id uuid := gen_random_uuid();  -- 预生成，先 insert 后 update 同一事务
   v_row upload_sessions%rowtype;
 begin
+  -- 0) 归属校验（终审返修 #3）：登录用户只能 complete 本人的会话；
+  --    service_role/worker（auth.uid()=null）跳过，由应用层授权
+  if auth.uid() is not null and auth.uid() <> p_user_id then
+    raise exception 'FORBIDDEN: caller does not match session owner' using errcode = '42501';
+  end if;
+
   -- 1) 原子抢占 pending → completed（影响行数 = 1 者胜出；暂不填 asset_id，避免外键悬空）
   update upload_sessions
      set status = 'completed', completed_at = now()
@@ -111,6 +118,7 @@ create or replace function expire_stale_upload_sessions()
 returns table (bucket text, path text)
 language plpgsql
 security definer
+set search_path = public, pg_temp  -- 终审返修 #2：固定 search_path
 as $$
 begin
   update upload_sessions set status = 'expired'
@@ -125,5 +133,18 @@ begin
        and a.id is null;
 end;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- 终审返修 #3：执行权限边界
+--   - complete_upload: 面向登录用户（authenticated）+ 应用后端（service_role）+ worker
+--   - expire_stale_upload_sessions: 仅 cron/worker（service_role / tapflow_worker）
+-- ---------------------------------------------------------------------------
+revoke execute on function complete_upload(uuid, uuid, uuid, text, text, text, text, bigint, int, int) from public;
+grant execute on function complete_upload(uuid, uuid, uuid, text, text, text, text, bigint, int, int)
+  to authenticated, service_role, tapflow_worker;
+
+revoke execute on function expire_stale_upload_sessions() from public;
+grant execute on function expire_stale_upload_sessions()
+  to service_role, tapflow_worker;
 
 commit;
