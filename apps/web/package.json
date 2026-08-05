@@ -11,9 +11,13 @@
     "check": "npm run typecheck && npm run lint && npm run build"
   },
   "dependencies": {
+    "@tapflow/contracts": "*",
+    "@xyflow/react": "^12.11.2",
+    "leafer-ui": "^2.2.9",
     "next": "16.3.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
