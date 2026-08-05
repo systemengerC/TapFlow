@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build and test output
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local databases and containers
+.supabase/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and temporary files
+*.log
+.DS_Store

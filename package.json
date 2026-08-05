@@ -1,0 +1,12 @@
+{
+  "name": "tapflow",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "npm run test -w @tapflow/contracts"
+  }
+}
