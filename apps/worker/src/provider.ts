@@ -75,7 +75,8 @@ export class FakeProvider implements GenerationProvider {
   }
 
   async submit(job: Job): Promise<ProviderSubmission> {
-    const fake = (job.params?.fake ?? {}) as FakeParams;
+    const params = (job.params ?? {}) as Record<string, unknown>;
+    const fake = (params.fake ?? {}) as FakeParams;
     if (fake.delayMs) {
       await this.sleep(fake.delayMs);
     }
