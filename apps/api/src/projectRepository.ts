@@ -66,6 +66,15 @@ export class InMemoryProjectRepository implements ProjectRepository {
     project.nodes = snapshot.nodes;
     project.edges = snapshot.edges;
   }
+
+  /** 仅内存模式联调用：operations 提交成功后同步推进画布版本，保证快照读路径一致。 */
+  async bumpCanvasVersion(projectId: string, canvasVersion: number): Promise<void> {
+    const project = this.projects.get(projectId);
+    if (!project) {
+      throw new ProjectNotFoundError(projectId);
+    }
+    project.canvasVersion = canvasVersion;
+  }
 }
 
 export class ProjectNotFoundError extends Error {

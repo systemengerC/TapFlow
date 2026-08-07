@@ -17,9 +17,10 @@ import {
   type ApplyOperationsRequest,
   type ApplyOperationsResponse,
   type PresignUploadRequest,
+  type ProjectSnapshotResponse,
 } from '@tapflow/contracts';
 
-import { ProjectNotFoundError, type ProjectRepository } from './projectRepository.ts';
+import { InMemoryProjectRepository, ProjectNotFoundError, type ProjectRepository } from './projectRepository.ts';
 import { JobNotFoundError, JobStateTransitionError, JobValidationError, type JobRepository } from './jobRepository.ts';
 import {
   UploadNotFoundError,
@@ -65,6 +66,11 @@ export class UnauthorizedError extends Error {
 
 export class InMemoryOperationsRepository implements OperationsRepository {
   private readonly versions = new Map<string, number>();
+  private readonly projectRepository: InMemoryProjectRepository | null;
+
+  constructor(projectRepository?: InMemoryProjectRepository) {
+    this.projectRepository = projectRepository ?? null;
+  }
 
   seed(projectId: string, canvasVersion: number): void {
     this.versions.set(projectId, canvasVersion);
@@ -74,6 +80,10 @@ export class InMemoryOperationsRepository implements OperationsRepository {
     projectId: string,
     request: ApplyOperationsRequest,
   ): Promise<ApplyOperationsResponse> {
+    // 有 projectRepository（内存模式联调）：真正把操作应用到画布快照，统一版本源。
+    if (this.projectRepository) {
+      return this.applyWithProject(projectId, request);
+    }
     const currentVersion = this.versions.get(projectId) ?? 0;
     if (currentVersion !== request.baseVersion) {
       throw new VersionConflictError(currentVersion);
@@ -81,6 +91,123 @@ export class InMemoryOperationsRepository implements OperationsRepository {
 
     const canvasVersion = currentVersion + 1;
     this.versions.set(projectId, canvasVersion);
+    return ApplyOperationsResponseSchema.parse({
+      appliedOperationIds: request.operations.map(({ operationId }) => operationId),
+      canvasVersion,
+    });
+  }
+
+  private async applyWithProject(
+    projectId: string,
+    request: ApplyOperationsRequest,
+  ): Promise<ApplyOperationsResponse> {
+    const snapshot = await this.projectRepository!.getSnapshot(projectId);
+    const currentVersion = snapshot.project.canvasVersion;
+    if (currentVersion !== request.baseVersion) {
+      throw new VersionConflictError(currentVersion);
+    }
+
+    const nodes = [...snapshot.nodes];
+    const edges = [...snapshot.edges];
+
+    for (const op of request.operations) {
+      switch (op.type) {
+        case 'create_node': {
+          nodes.push({
+            id: op.operationId,
+            nodeType: op.payload.nodeType as ProjectSnapshotResponse['nodes'][number]['nodeType'],
+            parentNodeId: op.payload.parentNodeId ?? null,
+            position: op.payload.position ?? { x: 0, y: 0 },
+            size: op.payload.size
+              ? { width: op.payload.size.x, height: op.payload.size.y }
+              : null,
+            data: op.payload.data ?? null,
+            jobId: null,
+          });
+          break;
+        }
+        case 'update_node': {
+          const node = nodes.find((n) => n.id === op.payload.nodeId);
+          if (node) {
+            const patch = op.payload.patch;
+            node.data =
+              patch && typeof patch === 'object' && !Array.isArray(patch)
+                ? { ...(node.data as object | null), ...(patch as object) }
+                : patch;
+          }
+          break;
+        }
+        case 'delete_node': {
+          const removed = new Set([op.payload.nodeId]);
+          for (let i = nodes.length - 1; i >= 0; i -= 1) {
+            if (nodes[i].id === op.payload.nodeId) nodes.splice(i, 1);
+          }
+          for (let i = edges.length - 1; i >= 0; i -= 1) {
+            const e = edges[i];
+            if (removed.has(e.sourceNodeId) || removed.has(e.targetNodeId)) {
+              edges.splice(i, 1);
+            }
+          }
+          break;
+        }
+        case 'move_nodes': {
+          for (const id of op.payload.nodeIds) {
+            const node = nodes.find((n) => n.id === id);
+            if (node && node.position) {
+              node.position = {
+                x: node.position.x + op.payload.delta.x,
+                y: node.position.y + op.payload.delta.y,
+              };
+            }
+          }
+          break;
+        }
+        case 'resize_nodes': {
+          for (const id of op.payload.nodeIds) {
+            const node = nodes.find((n) => n.id === id);
+            if (node) {
+              node.size = { width: op.payload.size.x, height: op.payload.size.y };
+            }
+          }
+          break;
+        }
+        case 'create_edge': {
+          edges.push({
+            id: op.operationId,
+            sourceNodeId: op.payload.source.nodeId,
+            targetNodeId: op.payload.target.nodeId,
+            edgeType: op.payload.edgeType,
+          });
+          break;
+        }
+        case 'delete_edge': {
+          for (let i = edges.length - 1; i >= 0; i -= 1) {
+            if (edges[i].id === op.payload.edgeId) edges.splice(i, 1);
+          }
+          break;
+        }
+        case 'attach_asset':
+        case 'replace_node_asset': {
+          const node = nodes.find((n) => n.id === op.payload.nodeId);
+          if (node) {
+            node.data = {
+              ...(node.data as object | null),
+              assetId: op.payload.assetId,
+            };
+          }
+          break;
+        }
+        default:
+          // rotate/reorder/lock/group/ungroup/set_viewport/create_job：
+          // 快照模型不持久化这些字段（或由 worker/结果驱动），内存端只入版本。
+          break;
+      }
+    }
+
+    const canvasVersion = currentVersion + 1;
+    await this.projectRepository!.saveSnapshot(projectId, { nodes, edges });
+    await this.projectRepository!.bumpCanvasVersion(projectId, canvasVersion);
+
     return ApplyOperationsResponseSchema.parse({
       appliedOperationIds: request.operations.map(({ operationId }) => operationId),
       canvasVersion,

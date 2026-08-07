@@ -19,12 +19,13 @@ if (Boolean(supabaseUrl) !== Boolean(supabaseAnonKey)) {
 }
 
 const useSupabase = Boolean(supabaseUrl && supabaseAnonKey);
-const operationsRepository = useSupabase
-  ? new SupabaseOperationsRepository({ supabaseUrl: supabaseUrl!, anonKey: supabaseAnonKey! })
-  : new InMemoryOperationsRepository();
 const projectRepository = useSupabase
   ? new SupabaseProjectRepository({ supabaseUrl: supabaseUrl!, anonKey: supabaseAnonKey! })
   : new InMemoryProjectRepository();
+const operationsRepository = useSupabase
+  ? new SupabaseOperationsRepository({ supabaseUrl: supabaseUrl!, anonKey: supabaseAnonKey! })
+  // 内存模式：注入同一个 projectRepository，让 operations 真正写入画布快照
+  : new InMemoryOperationsRepository(projectRepository as InMemoryProjectRepository);
 const uploadRepository = useSupabase
   ? new SupabaseUploadRepository({ supabaseUrl: supabaseUrl!, anonKey: supabaseAnonKey! })
   : new InMemoryUploadRepository();
