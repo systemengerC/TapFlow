@@ -16,6 +16,7 @@ import {
 
 import { createApp, InMemoryOperationsRepository, type OperationsRepository } from './app.ts';
 import { InMemoryProjectRepository, type ProjectRepository } from './projectRepository.ts';
+import { InMemoryUploadRepository } from './uploadRepository.ts';
 
 const U = (s: string): Uuid => s as Uuid;
 
@@ -28,7 +29,11 @@ async function withServer(
 ): Promise<void> {
   const projectRepo = repositories?.projects ?? new InMemoryProjectRepository();
   const operationRepo = repositories?.operations ?? new InMemoryOperationsRepository();
-  const server = createApp({ projectRepository: projectRepo, repository: operationRepo });
+  const server = createApp({
+    projectRepository: projectRepo,
+    repository: operationRepo,
+    uploadRepository: new InMemoryUploadRepository(),
+  });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;
   try {
