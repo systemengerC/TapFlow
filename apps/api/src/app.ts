@@ -3,14 +3,21 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import {
   ApplyOperationsRequestSchema,
   ApplyOperationsResponseSchema,
+  CreateProjectRequestSchema,
   ErrorResponseSchema,
+  ListProjectsResponseSchema,
+  ProjectSnapshotResponseSchema,
   UuidSchema,
   type ApplyOperationsRequest,
   type ApplyOperationsResponse,
 } from '@tapflow/contracts';
 
+import { ProjectNotFoundError, type ProjectRepository } from './projectRepository.ts';
+
 const MAX_REQUEST_BYTES = 256 * 1024;
 const OPERATIONS_ROUTE = /^\/api\/projects\/([^/]+)\/operations$/;
+const PROJECT_ROUTE = /^\/api\/projects$/;
+const PROJECT_SNAPSHOT_ROUTE = /^\/api\/projects\/([^/]+)$/;
 
 export interface OperationsRepository {
   apply(
@@ -64,6 +71,7 @@ export class InMemoryOperationsRepository implements OperationsRepository {
 
 type AppOptions = {
   repository: OperationsRepository;
+  projectRepository: ProjectRepository;
 };
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -84,6 +92,22 @@ function sendError(
   }));
 }
 
+function handleRepositoryError(response: ServerResponse, error: unknown): void {
+  if (error instanceof ProjectNotFoundError) {
+    sendError(response, 404, 'PROJECT_NOT_FOUND', error.message);
+    return;
+  }
+  if (error instanceof UnauthorizedError) {
+    sendError(response, 401, 'UNAUTHORIZED', error.message);
+    return;
+  }
+  if (error instanceof VersionConflictError) {
+    sendError(response, 409, 'CANVAS_VERSION_CONFLICT', error.message, error.currentVersion);
+    return;
+  }
+  sendError(response, 500, 'INTERNAL_ERROR', 'Unexpected server error');
+}
+
 async function readJson(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let received = 0;
@@ -98,12 +122,68 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-export function createApp({ repository }: AppOptions) {
+export function createApp({ repository, projectRepository }: AppOptions) {
   return createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
 
     if (request.method === 'GET' && url.pathname === '/health') {
       sendJson(response, 200, { status: 'ok', service: 'tapflow-api' });
+      return;
+    }
+
+    // ---------- 项目路由 ----------
+    if (PROJECT_ROUTE.test(url.pathname)) {
+      if (request.method === 'GET') {
+        try {
+          const projects = await projectRepository.list(request.headers.authorization);
+          sendJson(response, 200, ListProjectsResponseSchema.parse({ projects }));
+        } catch (error) {
+          handleRepositoryError(response, error);
+        }
+        return;
+      }
+      if (request.method === 'POST') {
+        let body: unknown;
+        try {
+          body = await readJson(request);
+        } catch (error) {
+          if (error instanceof Error && error.message === 'REQUEST_TOO_LARGE') {
+            sendError(response, 413, 'REQUEST_TOO_LARGE', 'Request body exceeds 256KB');
+          } else {
+            sendError(response, 400, 'INVALID_JSON', 'Request body must be valid JSON');
+          }
+          return;
+        }
+        const parsed = CreateProjectRequestSchema.safeParse(body);
+        if (!parsed.success) {
+          sendError(response, 400, 'INVALID_REQUEST', 'Request does not match the create project contract');
+          return;
+        }
+        try {
+          const project = await projectRepository.create(parsed.data, request.headers.authorization);
+          sendJson(response, 200, project);
+        } catch (error) {
+          handleRepositoryError(response, error);
+        }
+        return;
+      }
+      sendError(response, 404, 'NOT_FOUND', 'Route not found');
+      return;
+    }
+
+    const projectMatch = PROJECT_SNAPSHOT_ROUTE.exec(url.pathname);
+    if (projectMatch && request.method === 'GET') {
+      const projectId = decodeURIComponent(projectMatch[1]);
+      if (!UuidSchema.safeParse(projectId).success) {
+        sendError(response, 400, 'INVALID_PROJECT_ID', 'projectId must be a UUID');
+        return;
+      }
+      try {
+        const snapshot = await projectRepository.getSnapshot(projectId, request.headers.authorization);
+        sendJson(response, 200, ProjectSnapshotResponseSchema.parse(snapshot));
+      } catch (error) {
+        handleRepositoryError(response, error);
+      }
       return;
     }
 
@@ -144,21 +224,7 @@ export function createApp({ repository }: AppOptions) {
         request.headers.authorization,
       ));
     } catch (error) {
-      if (error instanceof VersionConflictError) {
-        sendError(
-          response,
-          409,
-          'CANVAS_VERSION_CONFLICT',
-          error.message,
-          error.currentVersion,
-        );
-        return;
-      }
-      if (error instanceof UnauthorizedError) {
-        sendError(response, 401, 'UNAUTHORIZED', error.message);
-        return;
-      }
-      sendError(response, 500, 'INTERNAL_ERROR', 'Unexpected server error');
+      handleRepositoryError(response, error);
     }
   });
 }

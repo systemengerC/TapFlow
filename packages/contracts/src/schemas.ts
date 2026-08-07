@@ -259,6 +259,61 @@ export const ErrorResponseSchema = z
   })
   .strict();
 
+// ---------- 项目（P0：项目列表 / 创建 / 快照加载） ----------
+export const ProjectSchema = z
+  .object({
+    id: UuidSchema,
+    name: z.string().min(1).max(200),
+    canvasVersion: z.number().int().nonnegative(),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+
+export const CreateProjectRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+  })
+  .strict();
+
+export const CreateProjectResponseSchema = ProjectSchema;
+
+export const ListProjectsResponseSchema = z
+  .object({
+    projects: z.array(ProjectSchema),
+  })
+  .strict();
+
+/** 画布快照节点（对应 canvas_nodes 行；client 侧直接消费） */
+export const ProjectNodeSnapshotSchema = z
+  .object({
+    id: UuidSchema,
+    nodeType: z.enum(['text', 'image', 'video', 'audio', 'generation_job', 'group', 'document']),
+    parentNodeId: UuidSchema.nullable(),
+    position: z.object({ x: z.number(), y: z.number() }).nullable(),
+    size: z.object({ width: z.number(), height: z.number() }).nullable(),
+    data: JsonSchema.nullable(),
+    jobId: UuidSchema.nullable(),
+  })
+  .strict();
+
+/** 画布快照边（对应 canvas_edges 行） */
+export const ProjectEdgeSnapshotSchema = z
+  .object({
+    id: UuidSchema,
+    sourceNodeId: UuidSchema,
+    targetNodeId: UuidSchema,
+    edgeType: z.enum(['reference', 'input', 'derived_from']),
+  })
+  .strict();
+
+export const ProjectSnapshotResponseSchema = z
+  .object({
+    project: ProjectSchema,
+    nodes: z.array(ProjectNodeSnapshotSchema),
+    edges: z.array(ProjectEdgeSnapshotSchema),
+  })
+  .strict();
+
 // ---------- 签名 URL（02 文档） ----------
 export const AssetTypeSchema = z.enum(['image', 'video', 'audio', 'thumbnail', 'document']);
 

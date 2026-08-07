@@ -30,6 +30,15 @@ export type PresignUploadResponse = z.infer<typeof S.PresignUploadResponseSchema
 export type CompleteUploadRequest = z.infer<typeof S.CompleteUploadRequestSchema>;
 export type CompleteUploadResponse = z.infer<typeof S.CompleteUploadResponseSchema>;
 
+// 项目相关
+export type Project = z.infer<typeof S.ProjectSchema>;
+export type CreateProjectRequest = z.infer<typeof S.CreateProjectRequestSchema>;
+export type CreateProjectResponse = z.infer<typeof S.CreateProjectResponseSchema>;
+export type ListProjectsResponse = z.infer<typeof S.ListProjectsResponseSchema>;
+export type ProjectNodeSnapshot = z.infer<typeof S.ProjectNodeSnapshotSchema>;
+export type ProjectEdgeSnapshot = z.infer<typeof S.ProjectEdgeSnapshotSchema>;
+export type ProjectSnapshotResponse = z.infer<typeof S.ProjectSnapshotResponseSchema>;
+
 // Job 相关
 export type JobStatus = z.infer<typeof S.JobStatusSchema>;
 export type JobStatusEvent = z.infer<typeof S.JobStatusEventSchema>;
