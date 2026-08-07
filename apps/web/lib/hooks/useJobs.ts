@@ -186,10 +186,11 @@ export function useJobs(projectId: string | null) {
 
   // 清理：组件卸载时停止所有轮询
   useEffect(() => {
+    const timers = pollingTimers.current;
     return () => {
-      Object.keys(pollingTimers.current).forEach(stopPolling);
+      Object.values(timers).forEach((timer) => clearTimeout(timer));
     };
-  }, [stopPolling]);
+  }, []);
 
   return {
     jobs: Object.values(jobs),
