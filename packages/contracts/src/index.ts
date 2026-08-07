@@ -42,4 +42,11 @@ export type ProjectSnapshotResponse = z.infer<typeof S.ProjectSnapshotResponseSc
 // Job 相关
 export type JobStatus = z.infer<typeof S.JobStatusSchema>;
 export type JobStatusEvent = z.infer<typeof S.JobStatusEventSchema>;
+export type Job = z.infer<typeof S.JobSchema>;
+export type JobType = z.infer<typeof S.JobTypeSchema>;
+export type CreateJobRequest = z.input<typeof S.CreateJobRequestSchema>;
+export type CreateJobResponse = z.infer<typeof S.CreateJobResponseSchema>;
+export type ListJobsResponse = z.infer<typeof S.ListJobsResponseSchema>;
+export type GetJobResponse = z.infer<typeof S.GetJobResponseSchema>;
+export type CancelJobResponse = z.infer<typeof S.CancelJobResponseSchema>;
 export type ErrorResponse = z.infer<typeof S.ErrorResponseSchema>;

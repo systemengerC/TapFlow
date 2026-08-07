@@ -1,6 +1,8 @@
 import { createApp, InMemoryOperationsRepository } from './app.ts';
+import { InMemoryJobRepository } from './jobRepository.ts';
 import { InMemoryProjectRepository } from './projectRepository.ts';
 import { InMemoryUploadRepository } from './uploadRepository.ts';
+import { SupabaseJobRepository } from './supabaseJobRepository.ts';
 import { SupabaseOperationsRepository } from './supabaseOperationsRepository.ts';
 import { SupabaseProjectRepository } from './supabaseProjectRepository.ts';
 import { SupabaseUploadRepository } from './supabaseUploadRepository.ts';
@@ -23,7 +25,10 @@ const projectRepository = useSupabase
 const uploadRepository = useSupabase
   ? new SupabaseUploadRepository({ supabaseUrl: supabaseUrl!, anonKey: supabaseAnonKey! })
   : new InMemoryUploadRepository();
-const server = createApp({ repository: operationsRepository, projectRepository, uploadRepository });
+const jobRepository = useSupabase
+  ? new SupabaseJobRepository({ supabaseUrl: supabaseUrl!, anonKey: supabaseAnonKey! })
+  : new InMemoryJobRepository();
+const server = createApp({ repository: operationsRepository, projectRepository, uploadRepository, jobRepository });
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`TapFlow API listening on http://localhost:${port}`);

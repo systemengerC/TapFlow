@@ -364,6 +364,70 @@ export const JobStatusEventSchema = z.discriminatedUnion('type', [
 export const JobStatusEnum = ['queued', 'running', 'cancel_requested', 'succeeded', 'failed', 'cancelled'] as const;
 export const JobStatusSchema = z.enum(JobStatusEnum);
 
+export const JobTypeSchema = z.enum(['text_to_image', 'image_to_video', 'text_to_video', 'tts', 'edit_image']);
+
+// ---------- Job API（03 文档 §4 取消流程 / §6 错误码） ----------
+export const JobSchema = z
+  .object({
+    id: UuidSchema,
+    projectId: UuidSchema,
+    parentJobId: UuidSchema.nullable(),
+    attempt: z.number().int().min(1),
+    jobType: JobTypeSchema,
+    provider: z.string().nullable(),
+    model: z.string().min(1),
+    params: JsonSchema,
+    inputNodeIds: z.array(UuidSchema),
+    status: JobStatusSchema,
+    providerJobId: z.string().nullable(),
+    errorCode: z.string().nullable(),
+    errorMessage: z.string().nullable(),
+    idempotencyKey: UuidSchema,
+    cancelRequestedAt: z.string().datetime().nullable(),
+    finishedAt: z.string().datetime().nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+
+export const CreateJobRequestSchema = z
+  .object({
+    projectId: UuidSchema,
+    jobType: JobTypeSchema,
+    model: z.string().min(1),
+    params: JsonSchema,
+    inputNodeIds: z.array(UuidSchema).max(50).default([]),
+    /** 幂等键（03 契约 §4.3 规则 3）：unique 约束防重复提交，缺省由服务端生成 */
+    idempotencyKey: UuidSchema.optional(),
+  })
+  .strict();
+
+export const CreateJobResponseSchema = z
+  .object({
+    job: JobSchema,
+    /** 是否命中幂等键返回已有 Job（重复提交不产生新 Job） */
+    idempotentReplay: z.boolean(),
+  })
+  .strict();
+
+export const ListJobsResponseSchema = z
+  .object({
+    jobs: z.array(JobSchema),
+  })
+  .strict();
+
+export const GetJobResponseSchema = z
+  .object({
+    job: JobSchema,
+  })
+  .strict();
+
+export const CancelJobResponseSchema = z
+  .object({
+    job: JobSchema,
+  })
+  .strict();
+
 // ---------- 完整响应 Schema（终审阻塞项 #1：补齐 200/202/accept/reject/complete） ----------
 
 /** 单条操作的真实落库结果：results[operationId] */

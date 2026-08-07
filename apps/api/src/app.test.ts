@@ -9,6 +9,7 @@ import {
   type OperationsRepository,
 } from './app.ts';
 import { InMemoryProjectRepository, type ProjectRepository } from './projectRepository.ts';
+import { InMemoryJobRepository } from './jobRepository.ts';
 import { InMemoryUploadRepository, type UploadRepository } from './uploadRepository.ts';
 
 const PROJECT_ID = '11111111-1111-4111-8111-111111111111';
@@ -26,7 +27,7 @@ async function start(
   projectRepository: ProjectRepository = new InMemoryProjectRepository(),
   uploadRepository: UploadRepository = new InMemoryUploadRepository(),
 ) {
-  const server = createApp({ repository, projectRepository, uploadRepository });
+  const server = createApp({ repository, projectRepository, uploadRepository, jobRepository: new InMemoryJobRepository() });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;

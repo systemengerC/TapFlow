@@ -15,6 +15,7 @@ import {
 } from '@tapflow/contracts';
 
 import { createApp, InMemoryOperationsRepository, type OperationsRepository } from './app.ts';
+import { InMemoryJobRepository } from './jobRepository.ts';
 import { InMemoryProjectRepository, type ProjectRepository } from './projectRepository.ts';
 import { InMemoryUploadRepository } from './uploadRepository.ts';
 
@@ -33,6 +34,7 @@ async function withServer(
     projectRepository: projectRepo,
     repository: operationRepo,
     uploadRepository: new InMemoryUploadRepository(),
+    jobRepository: new InMemoryJobRepository(),
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;

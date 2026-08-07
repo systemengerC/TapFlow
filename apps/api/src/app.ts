@@ -3,8 +3,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import {
   ApplyOperationsRequestSchema,
   ApplyOperationsResponseSchema,
+  CancelJobResponseSchema,
+  CreateJobRequestSchema,
+  CreateJobResponseSchema,
   CreateProjectRequestSchema,
   ErrorResponseSchema,
+  GetJobResponseSchema,
+  ListJobsResponseSchema,
   ListProjectsResponseSchema,
   PresignUploadRequestSchema,
   ProjectSnapshotResponseSchema,
@@ -15,6 +20,7 @@ import {
 } from '@tapflow/contracts';
 
 import { ProjectNotFoundError, type ProjectRepository } from './projectRepository.ts';
+import { JobNotFoundError, JobStateTransitionError, JobValidationError, type JobRepository } from './jobRepository.ts';
 import {
   UploadNotFoundError,
   UploadValidationError,
@@ -27,6 +33,10 @@ const PROJECT_ROUTE = /^\/api\/projects$/;
 const PROJECT_SNAPSHOT_ROUTE = /^\/api\/projects\/([^/]+)$/;
 const PRESIGN_UPLOAD_ROUTE = /^\/api\/assets\/presign-upload$/;
 const COMPLETE_UPLOAD_ROUTE = /^\/api\/assets\/([^/]+)\/complete$/;
+const JOBS_ROUTE = /^\/api\/jobs$/;
+const JOB_DETAIL_ROUTE = /^\/api\/jobs\/([^/]+)$/;
+const JOB_CANCEL_ROUTE = /^\/api\/jobs\/([^/]+)\/cancel$/;
+const PROJECT_JOBS_ROUTE = /^\/api\/projects\/([^/]+)\/jobs$/;
 
 export interface OperationsRepository {
   apply(
@@ -82,6 +92,7 @@ type AppOptions = {
   repository: OperationsRepository;
   projectRepository: ProjectRepository;
   uploadRepository: UploadRepository;
+  jobRepository: JobRepository;
 };
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -119,6 +130,18 @@ function handleRepositoryError(response: ServerResponse, error: unknown): void {
     sendError(response, status, error.code, error.message);
     return;
   }
+  if (error instanceof JobNotFoundError) {
+    sendError(response, 404, 'JOB_NOT_FOUND', error.message);
+    return;
+  }
+  if (error instanceof JobStateTransitionError) {
+    sendError(response, 409, 'INVALID_STATE_TRANSITION', error.message);
+    return;
+  }
+  if (error instanceof JobValidationError) {
+    sendError(response, 400, error.code, error.message);
+    return;
+  }
   if (error instanceof UnauthorizedError) {
     sendError(response, 401, 'UNAUTHORIZED', error.message);
     return;
@@ -144,12 +167,87 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-export function createApp({ repository, projectRepository, uploadRepository }: AppOptions) {
+export function createApp({ repository, projectRepository, uploadRepository, jobRepository }: AppOptions) {
   return createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
 
     if (request.method === 'GET' && url.pathname === '/health') {
       sendJson(response, 200, { status: 'ok', service: 'tapflow-api' });
+      return;
+    }
+
+    // ---------- Job 路由（03 契约） ----------
+    if (JOBS_ROUTE.test(url.pathname) && request.method === 'POST') {
+      let body: unknown;
+      try {
+        body = await readJson(request);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'REQUEST_TOO_LARGE') {
+          sendError(response, 413, 'REQUEST_TOO_LARGE', 'Request body exceeds 256KB');
+        } else {
+          sendError(response, 400, 'INVALID_JSON', 'Request body must be valid JSON');
+        }
+        return;
+      }
+      const parsed = CreateJobRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        sendError(response, 400, 'INVALID_REQUEST', 'Request does not match the create job contract');
+        return;
+      }
+      try {
+        const result = await jobRepository.create(parsed.data, request.headers.authorization);
+        sendJson(response, 201, CreateJobResponseSchema.parse(result));
+      } catch (error) {
+        handleRepositoryError(response, error);
+      }
+      return;
+    }
+
+    const projectJobsMatch = PROJECT_JOBS_ROUTE.exec(url.pathname);
+    if (projectJobsMatch && request.method === 'GET') {
+      const projectId = decodeURIComponent(projectJobsMatch[1]);
+      if (!UuidSchema.safeParse(projectId).success) {
+        sendError(response, 400, 'INVALID_PROJECT_ID', 'projectId must be a UUID');
+        return;
+      }
+      try {
+        const result = await jobRepository.listByProject(projectId, request.headers.authorization);
+        sendJson(response, 200, ListJobsResponseSchema.parse(result));
+      } catch (error) {
+        handleRepositoryError(response, error);
+      }
+      return;
+    }
+
+    const jobCancelMatch = JOB_CANCEL_ROUTE.exec(url.pathname);
+    if (jobCancelMatch && request.method === 'POST') {
+      const jobId = decodeURIComponent(jobCancelMatch[1]);
+      if (!UuidSchema.safeParse(jobId).success) {
+        sendError(response, 400, 'INVALID_JOB_ID', 'jobId must be a UUID');
+        return;
+      }
+      try {
+        const result = await jobRepository.cancel(jobId, request.headers.authorization);
+        sendJson(response, 200, CancelJobResponseSchema.parse(result));
+      } catch (error) {
+        handleRepositoryError(response, error);
+      }
+      return;
+    }
+
+    const jobDetailMatch = JOB_DETAIL_ROUTE.exec(url.pathname);
+    if (jobDetailMatch && request.method === 'GET') {
+      const jobId = decodeURIComponent(jobDetailMatch[1]);
+      if (!UuidSchema.safeParse(jobId).success) {
+        sendError(response, 400, 'INVALID_JOB_ID', 'jobId must be a UUID');
+        return;
+      }
+      try {
+        const job = await jobRepository.get(jobId, request.headers.authorization);
+        sendJson(response, 200, GetJobResponseSchema.parse({ job }));
+      } catch (error) {
+        handleRepositoryError(response, error);
+      }
       return;
     }
 

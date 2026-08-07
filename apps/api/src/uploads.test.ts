@@ -9,6 +9,7 @@ import {
 } from '@tapflow/contracts';
 
 import { createApp, InMemoryOperationsRepository } from './app.ts';
+import { InMemoryJobRepository } from './jobRepository.ts';
 import { InMemoryProjectRepository } from './projectRepository.ts';
 import { InMemoryUploadRepository } from './uploadRepository.ts';
 
@@ -29,6 +30,7 @@ const appOptions = (): AppOptions => ({
   repository: new InMemoryOperationsRepository(),
   projectRepository: new InMemoryProjectRepository(),
   uploadRepository: new InMemoryUploadRepository(),
+  jobRepository: new InMemoryJobRepository(),
 });
 
 test('presign: returns uploadId, signed URL and storagePath for a valid image', async () => {
