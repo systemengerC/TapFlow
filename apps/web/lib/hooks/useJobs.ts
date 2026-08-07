@@ -37,7 +37,7 @@ export function useJobs(projectId: string | null) {
 
   /** 创建 Job（幂等键防重） */
   const createJob = useCallback(
-    async (req: CreateJobRequest): Promise<Uuid | null> => {
+    async (req: Omit<CreateJobRequest, 'projectId'>): Promise<Uuid | null> => {
       if (!projectId) {
         setError('projectId 缺失');
         return null;

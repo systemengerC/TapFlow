@@ -13,7 +13,9 @@ import { useNodesStore } from '@/lib/stores/nodesStore';
 import { useCanvasStore } from '@/lib/stores/canvasStore';
 import Toolbar from '@/components/ui/Toolbar';
 import PropertiesPanel from '@/components/ui/PropertiesPanel';
-import type { ClientOperation, Uuid } from '@tapflow/contracts';
+import UploadButton from '@/components/ui/UploadButton';
+import JobsPanel from '@/components/ui/JobsPanel';
+import type { ClientOperation, Uuid, AssetType, Job } from '@tapflow/contracts';
 
 // Leafer 只能客户端实例化
 const LeaferCanvas = dynamic(() => import('@/components/canvas/LeaferCanvas'), {
@@ -80,6 +82,46 @@ export default function WorkspaceClient() {
     clearSelection();
   }, [clearSelection]);
 
+  // 上传完成 → 在画布上创建对应素材节点
+  const handleUploaded = useCallback(
+    (assetId: string, assetType: AssetType, file: File) => {
+      // 契约 nodeType 枚举不含 thumbnail，归一到 image
+      const nodeType = assetType === 'thumbnail' ? 'image' : assetType;
+      const op: ClientOperation = {
+        type: 'create_node',
+        operationId: crypto.randomUUID() as Uuid,
+        payload: {
+          nodeType,
+          position: { x: 120, y: 120 },
+          size: { x: 320, y: 240 },
+          data: { assetId, fileName: file.name, mimeType: file.type },
+          parentNodeId: null,
+        },
+      };
+      applyLocal(op);
+    },
+    [applyLocal],
+  );
+
+  // Job 成功 → 落一个 generation_job 节点承载输出
+  const handleJobSucceeded = useCallback(
+    (job: Job) => {
+      const op: ClientOperation = {
+        type: 'create_node',
+        operationId: crypto.randomUUID() as Uuid,
+        payload: {
+          nodeType: 'generation_job',
+          position: { x: 480, y: 120 },
+          size: { x: 320, y: 240 },
+          data: { jobId: job.id, jobType: job.jobType, model: job.model },
+          parentNodeId: null,
+        },
+      };
+      applyLocal(op);
+    },
+    [applyLocal],
+  );
+
   if (loading) {
     return (
       <div
@@ -135,8 +177,11 @@ export default function WorkspaceClient() {
       <LeaferCanvas onCanvasClick={handleCanvasClick} onCanvasEmpty={handleCanvasEmpty} />
 
       {/* DOM Overlay 层 */}
-      <Toolbar project={project} saving={flushing} saveError={saveError} onSave={flush} />
+      <Toolbar project={project} saving={flushing} saveError={saveError} onSave={flush}>
+        <UploadButton projectId={projectId} onUploaded={handleUploaded} />
+      </Toolbar>
       <PropertiesPanel />
+      <JobsPanel projectId={projectId} onJobSucceeded={handleJobSucceeded} />
     </div>
   );
 }

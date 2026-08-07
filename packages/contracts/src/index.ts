@@ -25,6 +25,7 @@ export type ApplyOperationsResponse = z.infer<typeof S.ApplyOperationsResponseSc
 export type AgentOperationsBatch = z.infer<typeof S.AgentOperationsBatchSchema>;
 
 // 上传相关
+export type AssetType = z.infer<typeof S.AssetTypeSchema>;
 export type PresignUploadRequest = z.infer<typeof S.PresignUploadRequestSchema>;
 export type PresignUploadResponse = z.infer<typeof S.PresignUploadResponseSchema>;
 export type CompleteUploadRequest = z.infer<typeof S.CompleteUploadRequestSchema>;

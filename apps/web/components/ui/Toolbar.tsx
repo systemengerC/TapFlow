@@ -12,9 +12,10 @@ interface ToolbarProps {
   saving?: boolean;
   saveError?: string | null;
   onSave?: () => void;
+  children?: React.ReactNode;
 }
 
-export default function Toolbar({ project, saving, saveError, onSave }: ToolbarProps) {
+export default function Toolbar({ project, saving, saveError, onSave, children }: ToolbarProps) {
   const { tool, setTool } = useCanvasStore();
   const pendingCount = useNodesStore((s) => s.pendingOperations.length);
 
@@ -83,6 +84,9 @@ export default function Toolbar({ project, saving, saveError, onSave }: ToolbarP
           {project.name}
         </div>
       )}
+
+      {/* 额外插槽（如上传按钮） */}
+      {children}
 
       {/* 保存状态 */}
       {(pendingCount > 0 || saving || saveError) && (
