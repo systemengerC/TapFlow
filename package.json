@@ -8,5 +8,9 @@
   ],
   "scripts": {
     "test": "npm run test -w @tapflow/contracts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.9.3"
   }
 }
