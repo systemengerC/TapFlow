@@ -3,7 +3,7 @@
  */
 'use client';
 
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useState } from 'react';
 import { useJobs } from '@/lib/hooks/useJobs';
 import CreateJobForm from '@/components/ui/CreateJobForm';
 import type { Job, Uuid, JobType } from '@tapflow/contracts';
@@ -17,11 +17,25 @@ interface JobsPanelProps {
 export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps) {
   const { jobs, loading, error, createJob, listJobs, cancelJob, startPolling, stopPolling } = useJobs(projectId);
   const succeededJobsRef = useRef<Set<Uuid>>(new Set());
+  // 首次加载完成前不触发成功回调：已 succeeded 的历史任务节点已在画布快照中，
+  // 重新回调会重复落节点（刷新页面即可复现）。
+  const [hydrated, setHydrated] = useState(false);
 
-  // 首次加载：拉取列表
+  // 首次加载：拉取列表，并把已成功的任务登记进守卫（不回调）
   useEffect(() => {
     if (!projectId) return;
-    listJobs();
+    let cancelled = false;
+    void (async () => {
+      const existing = await listJobs();
+      if (cancelled) return;
+      existing.forEach((job) => {
+        if (job.status === 'succeeded') succeededJobsRef.current.add(job.id);
+      });
+      setHydrated(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [projectId, listJobs]);
 
   // 对所有 queued/running 的任务自动开轮询
@@ -35,13 +49,14 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
 
   // 监听成功事件，触发回调（每个 job 只回调一次，避免轮询重复落节点）
   useEffect(() => {
+    if (!hydrated) return;
     jobs.forEach((job) => {
       if (job.status === 'succeeded' && !succeededJobsRef.current.has(job.id)) {
         succeededJobsRef.current.add(job.id);
         onJobSucceeded(job);
       }
     });
-  }, [jobs, onJobSucceeded]);
+  }, [hydrated, jobs, onJobSucceeded]);
 
   const handleCreateJob = useCallback(
     async (formData: {
