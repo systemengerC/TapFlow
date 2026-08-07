@@ -5,7 +5,8 @@
 
 import { useEffect, useCallback, useRef } from 'react';
 import { useJobs } from '@/lib/hooks/useJobs';
-import type { Job, Uuid } from '@tapflow/contracts';
+import CreateJobForm from '@/components/ui/CreateJobForm';
+import type { Job, Uuid, JobType } from '@tapflow/contracts';
 
 interface JobsPanelProps {
   projectId: string | null;
@@ -42,17 +43,19 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
     });
   }, [jobs, onJobSucceeded]);
 
-  const handleCreateJob = useCallback(async () => {
-    if (!projectId) return;
-    // 演示：创建一个 text_to_image 任务
-    const jobId = await createJob({
-      jobType: 'text_to_image',
-      model: 'dall-e-3',
-      params: { prompt: '一只可爱的猫', size: '1024x1024' },
-      inputNodeIds: [],
-    });
-    if (jobId) startPolling(jobId);
-  }, [projectId, createJob, startPolling]);
+  const handleCreateJob = useCallback(
+    async (formData: {
+      jobType: JobType;
+      model: string;
+      params: Record<string, unknown>;
+      inputNodeIds: string[];
+    }) => {
+      if (!projectId) return;
+      const jobId = await createJob(formData);
+      if (jobId) startPolling(jobId);
+    },
+    [projectId, createJob, startPolling],
+  );
 
   const handleCancel = useCallback(
     async (jobId: Uuid) => {
@@ -92,22 +95,7 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
         <div style={{ color: '#8a8a9a', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>
           生成任务 ({jobs.length})
         </div>
-        <button
-          onClick={handleCreateJob}
-          disabled={loading}
-          style={{
-            padding: '6px 12px',
-            background: '#3a3a4a',
-            color: '#e0e0ea',
-            border: 'none',
-            borderRadius: 6,
-            cursor: loading ? 'not-allowed' : 'pointer',
-            fontSize: 12,
-            fontWeight: 500,
-          }}
-        >
-          ➕ 新任务
-        </button>
+        <CreateJobForm onSubmit={handleCreateJob} disabled={loading} />
       </div>
 
       {error && (
