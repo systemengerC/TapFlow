@@ -167,13 +167,17 @@ export class SupabaseJobRepository implements JobRepository {
       return new UnauthorizedError('Authorization is required for Supabase access');
     }
     const error = await response.json().catch(() => ({})) as { message?: string; code?: string };
+    const message = error.message ?? `Supabase request failed: ${context} (HTTP ${response.status})`;
     if (response.status === 404) {
       return new JobNotFoundError(context);
     }
     if (response.status === 409) {
-      return new JobStateTransitionError(context, 'succeeded');
+      // 从错误消息提取实际状态（如 "cannot cancel job X in status 'failed'"），
+      // 不再硬编码 'succeeded'（P2-G）
+      const match = /status '([^']+)'/.exec(message);
+      return new JobStateTransitionError(context, (match?.[1] as Job['status']) ?? 'unknown');
     }
-    return new Error(error.message ?? `Supabase request failed: ${context} (HTTP ${response.status})`);
+    return new Error(message);
   }
 
   private headers(authorization?: string): HeadersInit {

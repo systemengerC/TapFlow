@@ -1,9 +1,25 @@
 -- ============================================================================
--- TapFlow Phase 1 — Down Migration（回滚全部 3 个 migration）
+-- TapFlow Phase 1 — Down Migration（回滚全部 4 个 migration）
 -- 执行顺序与 up 相反
 -- ============================================================================
 
 begin;
+
+-- migration 005: storage RLS + Worker 生命周期 + upload session RPC + 快照落库
+drop policy if exists storage_objects_update_owner on storage.objects;
+drop policy if exists storage_objects_insert_owner on storage.objects;
+drop policy if exists storage_objects_read_owner on storage.objects;
+alter table storage.objects disable row level security;
+
+drop function if exists set_generation_job_provider_id(uuid, text);
+drop function if exists rollback_cancel_generation_job(uuid);
+drop function if exists resolve_cancel_generation_job(uuid);
+drop function if exists fail_generation_job(uuid, text, text);
+drop function if exists complete_generation_job(uuid, jsonb);
+drop function if exists claim_next_generation_job();
+drop function if exists create_upload_session(uuid, text, text, bigint, int, int, text, text, timestamptz);
+drop function if exists complete_upload(uuid, uuid, uuid, text, text, text, text, bigint, int, int);
+drop table if exists generation_job_outputs;
 
 -- migration 003: RLS
 drop policy if exists generation_jobs_worker_read on generation_jobs;

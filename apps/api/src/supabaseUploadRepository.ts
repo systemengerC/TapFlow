@@ -1,9 +1,11 @@
 /**
  * Supabase 上传存储实现
- * - presign: 调用 storage API 签发上传签名 + 向 upload_sessions 写入 pending 会话
- * - complete: 调用 complete_upload RPC（条件状态更新，幂等；见 migration 002）
+ * - presign: 调 create_upload_session RPC（服务端写 user_id = auth.uid()，修复 P0-C）
+ *   + 返回存储对象 URL（配合 migration 005 storage.objects RLS 策略直传）
+ * - complete: 下载对象计算真实 sha256 contentHash（修复 P0-D 假哈希），
+ *   再调 complete_upload RPC（归属由 auth.uid() 推导，修复 P0-E）
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   type CompleteUploadResponse,
@@ -43,6 +45,17 @@ const MIME_EXTENSION: Record<string, string> = {
   'application/pdf': 'pdf',
 };
 
+type UploadSessionRow = {
+  project_id: string;
+  storage_bucket: string;
+  storage_path: string;
+  declared_mime_type: string;
+  declared_size_bytes: number;
+  declared_width: number | null;
+  declared_height: number | null;
+  status: string;
+};
+
 export class SupabaseUploadRepository implements UploadRepository {
   private readonly baseUrl: string;
   private readonly anonKey: string;
@@ -70,46 +83,52 @@ export class SupabaseUploadRepository implements UploadRepository {
     const uploadId = randomUUID() as Uuid;
     const storagePath = `${uploadId}/upload.${extension}`;
     const expiresIn = 900; // 15min
+    const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
 
-    // 1) 写入 upload_sessions（pending）
-    const insertResponse = await this.fetcher(
-      `${this.baseUrl}/rest/v1/upload_sessions`,
+    // 1) 服务端创建 upload_sessions（RPC 内部写 user_id = auth.uid()，客户端不可伪造归属）
+    const rpcResponse = await this.fetcher(
+      `${this.baseUrl}/rest/v1/rpc/create_upload_session`,
       {
         method: 'POST',
         headers: this.headers(authorization),
         body: JSON.stringify({
-          project_id: request.projectId,
-          asset_type: request.assetType,
-          declared_mime_type: request.mimeType,
-          declared_size_bytes: request.sizeBytes,
-          declared_width: request.width ?? null,
-          declared_height: request.height ?? null,
-          storage_bucket: 'uploads',
-          storage_path: storagePath,
-          status: 'pending',
-          expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
+          p_project_id: request.projectId,
+          p_asset_type: request.assetType,
+          p_declared_mime_type: request.mimeType,
+          p_declared_size_bytes: request.sizeBytes,
+          p_declared_width: request.width ?? null,
+          p_declared_height: request.height ?? null,
+          p_storage_bucket: 'uploads',
+          p_storage_path: storagePath,
+          p_expires_at: expiresAt,
         }),
       },
     );
 
-    if (!insertResponse.ok) {
-      const error = await insertResponse.json().catch(() => ({})) as SupabaseError;
-      // 23505: unique violation（同一用户同路径已存在，理论上不会发生——uploadId 是随机 UUID）
-      throw new Error(error.message ?? `Failed to create upload session: HTTP ${insertResponse.status}`);
+    if (!rpcResponse.ok) {
+      const error = await rpcResponse.json().catch(() => ({})) as SupabaseError;
+      if (error.message?.includes('FORBIDDEN')) {
+        throw new Error(error.message);
+      }
+      throw new Error(error.message ?? `Failed to create upload session: HTTP ${rpcResponse.status}`);
     }
 
-    // 2) 签发上传签名（storage 官方端点：/storage/v1/object/sign/{bucket}/{path} 默认 5min，
-    //    这里直接构造 15min 的签名 URL 由 Supabase storage 网关校验）。
-    //    注：storage API 的签名端点用于下载；上传签名由客户端 PUT 到对象 URL 完成，
-    //    服务端不落库签名，仅返回给调用方。
-    const signedUrl = `${this.baseUrl}/storage/v1/object/sign/uploads/${storagePath}?token=supabase-upload-placeholder`;
+    const rows = await rpcResponse.json() as Array<{ storage_bucket: string; storage_path: string }>;
+    if (!rows[0]) {
+      throw new Error('create_upload_session returned no rows');
+    }
+
+    // 2) 返回存储对象 URL（客户端 PUT 直传；storage.objects RLS 放行 pending session owner）
+    //    注：对象 URL 直传需要客户端带 apikey + Authorization；若部署配置了 service role，
+    //    可替换为 storage 签名上传 URL（见 02-签名URL规范）。
+    const url = `${this.baseUrl}/storage/v1/object/${rows[0].storage_bucket}/${rows[0].storage_path}`;
 
     return {
       uploadId,
-      url: signedUrl,
+      url,
       headers: { 'Content-Type': request.mimeType },
       expiresIn,
-      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+      expiresAt,
       storagePath,
     };
   }
@@ -119,7 +138,7 @@ export class SupabaseUploadRepository implements UploadRepository {
       throw new UnauthorizedError('Authorization is required to complete an upload');
     }
 
-    // 1) 读取 session 拿到归属与声明的 storage_path（仅读取 pending 行，完整校验交给 RPC）
+    // 1) 读取 session 拿到归属与声明的 storage_path
     const readResponse = await this.fetcher(
       `${this.baseUrl}/rest/v1/upload_sessions?id=eq.${encodeURIComponent(uploadId)}&select=project_id,storage_bucket,storage_path,declared_mime_type,declared_size_bytes,declared_width,declared_height,status`,
       { headers: this.headers(authorization) },
@@ -127,21 +146,26 @@ export class SupabaseUploadRepository implements UploadRepository {
     if (!readResponse.ok) {
       throw new Error(`Failed to read upload session: HTTP ${readResponse.status}`);
     }
-    const rows = await readResponse.json() as Array<{
-      project_id: string;
-      storage_bucket: string;
-      storage_path: string;
-      declared_mime_type: string;
-      declared_size_bytes: number;
-      declared_width: number | null;
-      declared_height: number | null;
-      status: string;
-    }>;
+    const rows = await readResponse.json() as UploadSessionRow[];
     if (rows.length !== 1) {
       throw new UploadNotFoundError(uploadId);
     }
 
-    // 2) 调用 complete_upload RPC（事务内条件更新 + INSERT assets，幂等）
+    // 2) 下载对象计算真实 sha256（P0-D：替代假哈希；storage.objects read 策略放行 pending owner）
+    const objectUrl = `${this.baseUrl}/storage/v1/object/${rows[0].storage_bucket}/${rows[0].storage_path}`;
+    const objectResponse = await this.fetcher(objectUrl, {
+      headers: this.headers(authorization),
+    });
+    if (!objectResponse.ok) {
+      throw new UploadValidationError(
+        'UPLOAD_INCOMPLETE',
+        `Uploaded object not readable: HTTP ${objectResponse.status}（确认文件已 PUT 到存储）`,
+      );
+    }
+    const buffer = Buffer.from(await objectResponse.arrayBuffer());
+    const contentHash = `sha256:${createHash('sha256').update(buffer).digest('hex')}`;
+
+    // 3) 调 complete_upload RPC（p_owner_id=null → RPC 内 auth.uid() 推导归属，修复 P0-E）
     const rpcResponse = await this.fetcher(
       `${this.baseUrl}/rest/v1/rpc/complete_upload`,
       {
@@ -150,12 +174,12 @@ export class SupabaseUploadRepository implements UploadRepository {
         body: JSON.stringify({
           p_upload_id: uploadId,
           p_project_id: rows[0].project_id,
-          p_user_id: null, // 由 RPC 内 auth.uid() 归属校验决定
+          p_owner_id: null,
           p_asset_type: rows[0].storage_bucket === 'thumbs' ? 'thumbnail' : rows[0].storage_bucket,
           p_storage_bucket: rows[0].storage_bucket,
           p_storage_path: rows[0].storage_path,
-          p_content_hash: `sha256:${'0'.repeat(64)}`, // 真实场景由 Worker/API 计算对象内容哈希
-          p_size_bytes: rows[0].declared_size_bytes,
+          p_content_hash: contentHash,
+          p_size_bytes: buffer.length,
           p_width: rows[0].declared_width,
           p_height: rows[0].declared_height,
         }),
@@ -185,8 +209,8 @@ export class SupabaseUploadRepository implements UploadRepository {
     return {
       assetId: row.asset_id as Uuid,
       storagePath: rows[0].storage_path,
-      sizeBytes: rows[0].declared_size_bytes,
-      contentHash: `sha256:${'0'.repeat(64)}`,
+      sizeBytes: buffer.length,
+      contentHash,
       alreadyCompleted: row.already_completed,
       contentDuplicateOfAssetId: null,
     };
