@@ -47,6 +47,7 @@ const MIME_EXTENSION: Record<string, string> = {
 
 type UploadSessionRow = {
   project_id: string;
+  asset_type: string;
   storage_bucket: string;
   storage_path: string;
   declared_mime_type: string;
@@ -138,9 +139,9 @@ export class SupabaseUploadRepository implements UploadRepository {
       throw new UnauthorizedError('Authorization is required to complete an upload');
     }
 
-    // 1) 读取 session 拿到归属与声明的 storage_path
+    // 1) 读取 session 拿到归属、声明的 asset_type 与 storage_path
     const readResponse = await this.fetcher(
-      `${this.baseUrl}/rest/v1/upload_sessions?id=eq.${encodeURIComponent(uploadId)}&select=project_id,storage_bucket,storage_path,declared_mime_type,declared_size_bytes,declared_width,declared_height,status`,
+      `${this.baseUrl}/rest/v1/upload_sessions?id=eq.${encodeURIComponent(uploadId)}&select=project_id,asset_type,storage_bucket,storage_path,declared_mime_type,declared_size_bytes,declared_width,declared_height,status`,
       { headers: this.headers(authorization) },
     );
     if (!readResponse.ok) {
@@ -166,6 +167,8 @@ export class SupabaseUploadRepository implements UploadRepository {
     const contentHash = `sha256:${createHash('sha256').update(buffer).digest('hex')}`;
 
     // 3) 调 complete_upload RPC（p_owner_id=null → RPC 内 auth.uid() 推导归属，修复 P0-E）
+    //    asset_type 使用 presign 时声明的 session.asset_type（经契约 AssetTypeSchema 校验），
+    //    不得用 bucket 名推导（'uploads' 不在 assets CHECK 约束内，修复 P0-2）
     const rpcResponse = await this.fetcher(
       `${this.baseUrl}/rest/v1/rpc/complete_upload`,
       {
@@ -175,7 +178,7 @@ export class SupabaseUploadRepository implements UploadRepository {
           p_upload_id: uploadId,
           p_project_id: rows[0].project_id,
           p_owner_id: null,
-          p_asset_type: rows[0].storage_bucket === 'thumbs' ? 'thumbnail' : rows[0].storage_bucket,
+          p_asset_type: rows[0].asset_type,
           p_storage_bucket: rows[0].storage_bucket,
           p_storage_path: rows[0].storage_path,
           p_content_hash: contentHash,

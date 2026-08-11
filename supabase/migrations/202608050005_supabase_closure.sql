@@ -140,10 +140,12 @@ begin
           raise exception 'INVALID_REFERENCE: one or more nodes do not exist' using errcode = 'P0001';
         end if;
         -- 契约 Vec2Schema {x,y} → 快照 size {width,height}
+        -- 注意：必须 ::numeric 转数值，->>'x' 返回 text 会被 jsonb_build_object 序列化成 JSON 字符串
+        -- （快照契约 size.width/height 为 number，P0-3 修复）
         update canvas_nodes
            set size = jsonb_build_object(
-                 'width',  v_payload->'size'->>'x',
-                 'height', v_payload->'size'->>'y'),
+                 'width',  (v_payload->'size'->>'x')::numeric,
+                 'height', (v_payload->'size'->>'y')::numeric),
                updated_at = now()
          where project_id = p_project_id and id = any(v_node_ids);
 
@@ -299,8 +301,11 @@ begin
 
   update generation_jobs
      set status = 'succeeded', finished_at = now(), updated_at = now()
-   where id = p_job_id;
+   where id = p_job_id
+  returning * into v_job;
 
+  -- 注意：必须返回更新后的行（returning *），否则调用方拿到 running 旧行，
+  -- 会把成功任务误报为仍在运行（P0-3 修复）
   return query select row_to_json(v_job)::jsonb;
 end;
 $$;

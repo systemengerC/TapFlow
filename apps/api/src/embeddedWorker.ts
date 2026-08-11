@@ -8,7 +8,7 @@
  */
 import { FakeProvider, type ProviderRegistry } from '../../worker/src/provider.ts';
 import { Runner } from '../../worker/src/runner.ts';
-import { InMemoryWorkerStore } from '../../worker/src/workerStore.ts';
+import { InMemoryWorkerStore, type WorkerStore } from '../../worker/src/workerStore.ts';
 import type { CancelJobResponse, CreateJobRequest, CreateJobResponse, Job, ListJobsResponse } from '@tapflow/contracts';
 
 import type { JobRepository } from './jobRepository.ts';
@@ -47,8 +47,8 @@ export class EmbeddedWorkerJobRepository implements JobRepository {
   }
 }
 
-/** 启动内嵌 worker（返回 Runner 供关闭） */
-export function startEmbeddedWorker(store: InMemoryWorkerStore): Runner {
+/** 启动内嵌 worker（返回 Runner 供关闭）；store 为 WorkerStore 接口，内存/Supabase 均可驱动 */
+export function startEmbeddedWorker(store: WorkerStore): Runner {
   const providers: ProviderRegistry = new Map();
   const fake = new FakeProvider();
   for (const jobType of fake.jobTypes) {

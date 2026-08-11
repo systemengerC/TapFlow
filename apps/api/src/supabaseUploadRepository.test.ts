@@ -110,6 +110,7 @@ test('complete downloads the object, computes real sha256, and calls RPC without
     'rest/v1/upload_sessions': () =>
       jsonResponse([{
         project_id: PROJECT_ID,
+        asset_type: 'image',
         storage_bucket: 'uploads',
         storage_path: `${UPLOAD_ID}/upload.png`,
         declared_mime_type: 'image/png',
@@ -136,6 +137,38 @@ test('complete downloads the object, computes real sha256, and calls RPC without
   assert.equal(result.assetId, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee');
   assert.equal(rpcBody.p_owner_id, null); // 归属由 RPC 内 auth.uid() 推导
   assert.equal(rpcBody.p_content_hash, 'sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81');
+  // P0-2：asset_type 必须来自 session（presign 声明），不能拿 bucket 名 'uploads' 当 asset_type
+  assert.equal(rpcBody.p_asset_type, 'image');
+});
+
+test('complete passes declared asset_type from session, never the bucket name (P0-2)', async () => {
+  let rpcBody: any = null;
+  const repo = makeRepo({
+    'rest/v1/upload_sessions': () =>
+      jsonResponse([{
+        project_id: PROJECT_ID,
+        // 即使桶是 uploads，asset_type 也必须是契约枚举值（来自 presign 声明）
+        asset_type: 'video',
+        storage_bucket: 'uploads',
+        storage_path: `${UPLOAD_ID}/clip.mp4`,
+        declared_mime_type: 'video/mp4',
+        declared_size_bytes: 5,
+        declared_width: null,
+        declared_height: null,
+        status: 'pending',
+      }]),
+    'storage/v1/object/uploads': () => new Response(new Uint8Array([9, 9, 9, 9, 9]), { status: 200 }),
+    'rpc/complete_upload': (init) => {
+      rpcBody = JSON.parse(String(init.body));
+      return jsonResponse([{ asset_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', already_completed: false }]);
+    },
+  });
+
+  await repo.complete(UPLOAD_ID, 'Bearer test-jwt');
+
+  assert.equal(rpcBody.p_asset_type, 'video');
+  assert.notEqual(rpcBody.p_asset_type, 'uploads');
+  assert.equal(rpcBody.p_storage_bucket, 'uploads');
 });
 
 test('complete maps unknown upload id to 404', async () => {
