@@ -135,14 +135,27 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {jobs.map((job) => (
-          <JobCard key={job.id} job={job} onCancel={handleCancel} />
+          <JobCard key={job.id} job={job} onCancel={handleCancel} onRetry={handleCreateJob} />
         ))}
       </div>
     </div>
   );
 }
 
-function JobCard({ job, onCancel }: { job: Job; onCancel: (id: Uuid) => void }) {
+function JobCard({
+  job,
+  onCancel,
+  onRetry,
+}: {
+  job: Job;
+  onCancel: (id: Uuid) => void;
+  onRetry?: (formData: {
+    jobType: JobType;
+    model: string;
+    params: Record<string, unknown>;
+    inputNodeIds: string[];
+  }) => void;
+}) {
   const statusColor = {
     queued: '#8a8a9a',
     running: '#5a9aef',
@@ -183,6 +196,32 @@ function JobCard({ job, onCancel }: { job: Job; onCancel: (id: Uuid) => void }) 
 
       {job.status === 'failed' && job.errorMessage && (
         <div style={{ color: '#e08090', fontSize: 11 }}>错误: {job.errorMessage}</div>
+      )}
+
+      {job.status === 'failed' && onRetry && (
+        <button
+          onClick={() => {
+            onRetry({
+              jobType: job.jobType,
+              model: job.model,
+              params: job.params as Record<string, unknown>,
+              inputNodeIds: job.inputNodeIds,
+            });
+          }}
+          style={{
+            padding: '4px 8px',
+            background: '#3a3a4a',
+            color: '#5a9aef',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer',
+            fontSize: 11,
+            alignSelf: 'flex-start',
+          }}
+          title="用相同参数重新提交任务"
+        >
+          🔄 重试
+        </button>
       )}
 
       {canCancel && (

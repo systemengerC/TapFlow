@@ -55,6 +55,17 @@ export default function PropertiesPanel() {
     applyLocal(op);
   }
 
+  function handleDelete() {
+    for (const id of selectedNodeIds) {
+      const op: ClientOperation = {
+        type: 'delete_node',
+        operationId: crypto.randomUUID() as Uuid,
+        payload: { nodeId: id as Uuid },
+      };
+      applyLocal(op);
+    }
+  }
+
   return (
     <div
       style={{
@@ -114,13 +125,51 @@ export default function PropertiesPanel() {
               {node.locked ? '🔒 已锁' : '🔓 未锁'}
             </button>
           </Row>
+
+          <Divider />
+
+          {/* 删除 */}
+          <button
+            onClick={handleDelete}
+            style={{
+              padding: '8px 12px',
+              background: '#3a2028',
+              color: '#e08090',
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 500,
+              width: '100%',
+            }}
+          >
+            🗑️ 删除节点
+          </button>
         </>
       )}
 
       {multiSelect && (
-        <div style={{ color: '#8a8a9a', fontSize: 12 }}>
-          批量选中，支持整体移动和调整大小。
-        </div>
+        <>
+          <div style={{ color: '#8a8a9a', fontSize: 12, marginBottom: 12 }}>
+            批量选中，支持整体移动和调整大小。
+          </div>
+          <button
+            onClick={handleDelete}
+            style={{
+              padding: '8px 12px',
+              background: '#3a2028',
+              color: '#e08090',
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 500,
+              width: '100%',
+            }}
+          >
+            🗑️ 删除 {selectedNodeIds.length} 个节点
+          </button>
+        </>
       )}
     </div>
   );
