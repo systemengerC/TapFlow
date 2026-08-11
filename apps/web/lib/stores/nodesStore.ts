@@ -70,6 +70,7 @@ export const useNodesStore = create<NodesState>((set, get) => ({
     set((s) => {
       const nodes = { ...s.nodes };
       const edges = { ...s.edges };
+      let shouldEnqueue = true; // 默认入队，本地瞬时操作例外
 
       switch (op.type) {
         case 'create_node': {
@@ -142,6 +143,8 @@ export const useNodesStore = create<NodesState>((set, get) => ({
             if (n && !n.locked)
               nodes[id] = { ...n, rotation: op.payload.rotation };
           }
+          // rotate 是前端本地 UI 状态（快照 schema 不存在该字段），不持久化
+          shouldEnqueue = false;
           break;
         }
         case 'reorder_nodes': {
@@ -149,6 +152,8 @@ export const useNodesStore = create<NodesState>((set, get) => ({
             const n = nodes[id];
             if (n) nodes[id] = { ...n, zIndex: op.payload.zIndex };
           }
+          // zIndex 是前端本地渲染层次，不持久化
+          shouldEnqueue = false;
           break;
         }
         case 'set_nodes_locked': {
@@ -156,6 +161,8 @@ export const useNodesStore = create<NodesState>((set, get) => ({
             const n = nodes[id];
             if (n) nodes[id] = { ...n, locked: op.payload.locked };
           }
+          // locked 是前端本地 UI 状态（快照 schema 不存在该字段），不持久化
+          shouldEnqueue = false;
           break;
         }
         case 'create_edge': {
@@ -181,7 +188,9 @@ export const useNodesStore = create<NodesState>((set, get) => ({
       return {
         nodes,
         edges,
-        pendingOperations: [...s.pendingOperations, op],
+        pendingOperations: shouldEnqueue
+          ? [...s.pendingOperations, op]
+          : s.pendingOperations,
       };
     }),
 

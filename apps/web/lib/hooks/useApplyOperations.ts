@@ -64,6 +64,19 @@ export function useApplyOperations(projectId: string | null) {
             errBody.success ? errBody.data.currentVersion : undefined,
           );
         }
+        // 422 UNSUPPORTED_OPERATION：本地瞬时操作误入队列，跳过而不卡死
+        if (res.status === 422 && errBody.success && errBody.data.error.code === 'UNSUPPORTED_OPERATION') {
+          // 从队列中移除该操作，让后续合法操作能继续 flush
+          const { pendingOperations } = useNodesStore.getState();
+          const failedOpId = batch[0]?.operationId; // 单批失败时第一个 op 就是问题操作
+          if (failedOpId) {
+            useNodesStore.setState({
+              pendingOperations: pendingOperations.filter(op => op.operationId !== failedOpId),
+            });
+          }
+          setError('部分操作不支持持久化，已跳过');
+          return null; // 不抛错，让调用方继续正常流程
+        }
         throw new Error(
           errBody.success ? errBody.data.error.message : `HTTP ${res.status}`,
         );
