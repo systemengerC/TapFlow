@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "test": "node --test lib/stores/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint",
     "check": "npm run typecheck && npm run lint && npm run build"
