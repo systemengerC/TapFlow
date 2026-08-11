@@ -67,6 +67,25 @@ export class InMemoryProjectRepository implements ProjectRepository {
     project.edges = snapshot.edges;
   }
 
+  /**
+   * 原子提交：节点/边与画布版本在同一个同步块内更新（内存模式无 I/O，无 await 间隙，
+   * JS 事件循环内不可能被读取/写入穿插），保证快照内容与版本永远一致。
+   * operations 提交路径必须走此方法，禁止拆成 saveSnapshot + bumpCanvasVersion 两次调用。
+   */
+  async commitSnapshot(
+    projectId: string,
+    snapshot: { nodes: NodeSnapshotInput[]; edges: EdgeSnapshotInput[] },
+    canvasVersion: number,
+  ): Promise<void> {
+    const project = this.projects.get(projectId);
+    if (!project) {
+      throw new ProjectNotFoundError(projectId);
+    }
+    project.nodes = snapshot.nodes;
+    project.edges = snapshot.edges;
+    project.canvasVersion = canvasVersion;
+  }
+
   /** 仅内存模式联调用：operations 提交成功后同步推进画布版本，保证快照读路径一致。 */
   async bumpCanvasVersion(projectId: string, canvasVersion: number): Promise<void> {
     const project = this.projects.get(projectId);

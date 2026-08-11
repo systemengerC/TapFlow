@@ -57,6 +57,17 @@ export class VersionConflictError extends Error {
   }
 }
 
+/** 操作语义校验失败（非并发冲突）：nodeType 非法 / 引用不存在 / 重复 id / 快照无法持久化的操作类型。 */
+export class OperationValidationError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'OperationValidationError';
+    this.code = code;
+  }
+}
+
 export class UnauthorizedError extends Error {
   constructor(message: string) {
     super(message);
@@ -64,9 +75,30 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/** 快照模型可忠实持久化的操作；其余（rotate/reorder/lock/group/ungroup/set_viewport/create_job）
+ *  快照 schema 无对应字段，客户端提交路径明确拒绝（422），禁止"假成功"。
+ *  create_job 请走 POST /api/jobs（真正的 job 实体创建），不经过 applyOperations。 */
+const SNAPSHOT_PERSISTENT_OPERATIONS = new Set<string>([
+  'create_node',
+  'update_node',
+  'delete_node',
+  'move_nodes',
+  'resize_nodes',
+  'create_edge',
+  'delete_edge',
+  'attach_asset',
+  'replace_node_asset',
+]);
+
+/** 与 ProjectNodeSnapshotSchema.nodeType 枚举一致；非法 nodeType 会污染快照导致 GET 500。 */
+const SNAPSHOT_NODE_TYPES = ['text', 'image', 'video', 'audio', 'generation_job', 'group', 'document'] as const;
+type SnapshotNodeType = (typeof SNAPSHOT_NODE_TYPES)[number];
+
 export class InMemoryOperationsRepository implements OperationsRepository {
   private readonly versions = new Map<string, number>();
   private readonly projectRepository: InMemoryProjectRepository | null;
+  /** 每个 projectId 一条 promise 链：同一画布的 apply 串行执行，杜绝并发读-改-写丢失更新。 */
+  private readonly locks = new Map<string, Promise<unknown>>();
 
   constructor(projectRepository?: InMemoryProjectRepository) {
     this.projectRepository = projectRepository ?? null;
@@ -80,15 +112,15 @@ export class InMemoryOperationsRepository implements OperationsRepository {
     projectId: string,
     request: ApplyOperationsRequest,
   ): Promise<ApplyOperationsResponse> {
-    // 有 projectRepository（内存模式联调）：真正把操作应用到画布快照，统一版本源。
     if (this.projectRepository) {
-      return this.applyWithProject(projectId, request);
+      // 内存模式联调：同一项目串行化（并发安全），真正应用操作到画布快照。
+      return this.serialize(projectId, () => this.applyWithProject(projectId, request));
     }
     const currentVersion = this.versions.get(projectId) ?? 0;
     if (currentVersion !== request.baseVersion) {
       throw new VersionConflictError(currentVersion);
     }
-
+    this.validateBatch(request.operations);
     const canvasVersion = currentVersion + 1;
     this.versions.set(projectId, canvasVersion);
     return ApplyOperationsResponseSchema.parse({
@@ -97,25 +129,68 @@ export class InMemoryOperationsRepository implements OperationsRepository {
     });
   }
 
-  private async applyWithProject(
-    projectId: string,
-    request: ApplyOperationsRequest,
-  ): Promise<ApplyOperationsResponse> {
-    const snapshot = await this.projectRepository!.getSnapshot(projectId);
-    const currentVersion = snapshot.project.canvasVersion;
-    if (currentVersion !== request.baseVersion) {
-      throw new VersionConflictError(currentVersion);
+  /** promise 链互斥：前一个任务完成后才执行下一个；失败不影响后续任务。 */
+  private async serialize<T>(projectId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(projectId) ?? Promise.resolve();
+    const run = previous.then(async () => {
+      const result = await task();
+      return result;
+    });
+    this.locks.set(projectId, run.catch(() => undefined));
+    return run;
+  }
+
+  /** 批次级校验（不依赖画布状态）：重复 operationId + 快照可持久化类型白名单。 */
+  private validateBatch(operations: ApplyOperationsRequest['operations']): void {
+    const seen = new Set<string>();
+    for (const op of operations) {
+      if (seen.has(op.operationId)) {
+        throw new OperationValidationError(
+          'DUPLICATE_OPERATION_ID',
+          `operationId ${op.operationId} appears more than once in the batch`,
+        );
+      }
+      seen.add(op.operationId);
+      if (!SNAPSHOT_PERSISTENT_OPERATIONS.has(op.type)) {
+        throw new OperationValidationError(
+          'UNSUPPORTED_OPERATION',
+          `operation type '${op.type}' cannot be persisted by the canvas snapshot; use the dedicated API (e.g. POST /api/jobs for create_job)`,
+        );
+      }
     }
+  }
 
-    const nodes = [...snapshot.nodes];
-    const edges = [...snapshot.edges];
+  private requireNode(nodeIds: Set<string>, nodeId: string): void {
+    if (!nodeIds.has(nodeId)) {
+      throw new OperationValidationError('INVALID_REFERENCE', `node ${nodeId} does not exist`);
+    }
+  }
 
-    for (const op of request.operations) {
+  /** 在内存副本上应用操作（含引用完整性校验）；任何失败抛 OperationValidationError，
+   *  副本被丢弃，快照不变——批次全有或全无（回滚语义）。 */
+  private applyOperationsToCanvas(
+    nodes: ProjectSnapshotResponse['nodes'],
+    edges: ProjectSnapshotResponse['edges'],
+    operations: ApplyOperationsRequest['operations'],
+  ): void {
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const edgeIds = new Set(edges.map((e) => e.id));
+
+    for (const op of operations) {
       switch (op.type) {
         case 'create_node': {
-          nodes.push({
+          if (!(SNAPSHOT_NODE_TYPES as readonly string[]).includes(op.payload.nodeType)) {
+            throw new OperationValidationError(
+              'INVALID_NODE_TYPE',
+              `nodeType '${op.payload.nodeType}' is not a valid canvas node type`,
+            );
+          }
+          if (nodeIds.has(op.operationId)) {
+            throw new OperationValidationError('DUPLICATE_NODE_ID', `node id ${op.operationId} already exists`);
+          }
+          const node: ProjectSnapshotResponse['nodes'][number] = {
             id: op.operationId,
-            nodeType: op.payload.nodeType as ProjectSnapshotResponse['nodes'][number]['nodeType'],
+            nodeType: op.payload.nodeType as SnapshotNodeType,
             parentNodeId: op.payload.parentNodeId ?? null,
             position: op.payload.position ?? { x: 0, y: 0 },
             size: op.payload.size
@@ -123,10 +198,13 @@ export class InMemoryOperationsRepository implements OperationsRepository {
               : null,
             data: op.payload.data ?? null,
             jobId: null,
-          });
+          };
+          nodes.push(node);
+          nodeIds.add(op.operationId);
           break;
         }
         case 'update_node': {
+          this.requireNode(nodeIds, op.payload.nodeId);
           const node = nodes.find((n) => n.id === op.payload.nodeId);
           if (node) {
             const patch = op.payload.patch;
@@ -138,19 +216,29 @@ export class InMemoryOperationsRepository implements OperationsRepository {
           break;
         }
         case 'delete_node': {
-          const removed = new Set([op.payload.nodeId]);
+          this.requireNode(nodeIds, op.payload.nodeId);
+          // 子节点解除挂载（保留数据），父节点删除不级联销毁内容节点
+          for (const n of nodes) {
+            if (n.parentNodeId === op.payload.nodeId) n.parentNodeId = null;
+          }
           for (let i = nodes.length - 1; i >= 0; i -= 1) {
             if (nodes[i].id === op.payload.nodeId) nodes.splice(i, 1);
           }
+          nodeIds.delete(op.payload.nodeId);
+          // 连带删除关联边
           for (let i = edges.length - 1; i >= 0; i -= 1) {
             const e = edges[i];
-            if (removed.has(e.sourceNodeId) || removed.has(e.targetNodeId)) {
+            if (e.sourceNodeId === op.payload.nodeId || e.targetNodeId === op.payload.nodeId) {
               edges.splice(i, 1);
+              edgeIds.delete(e.id);
             }
           }
           break;
         }
         case 'move_nodes': {
+          for (const id of op.payload.nodeIds) {
+            this.requireNode(nodeIds, id);
+          }
           for (const id of op.payload.nodeIds) {
             const node = nodes.find((n) => n.id === id);
             if (node && node.position) {
@@ -164,6 +252,9 @@ export class InMemoryOperationsRepository implements OperationsRepository {
         }
         case 'resize_nodes': {
           for (const id of op.payload.nodeIds) {
+            this.requireNode(nodeIds, id);
+          }
+          for (const id of op.payload.nodeIds) {
             const node = nodes.find((n) => n.id === id);
             if (node) {
               node.size = { width: op.payload.size.x, height: op.payload.size.y };
@@ -172,22 +263,33 @@ export class InMemoryOperationsRepository implements OperationsRepository {
           break;
         }
         case 'create_edge': {
+          this.requireNode(nodeIds, op.payload.source.nodeId);
+          this.requireNode(nodeIds, op.payload.target.nodeId);
+          if (edgeIds.has(op.operationId)) {
+            throw new OperationValidationError('DUPLICATE_EDGE_ID', `edge id ${op.operationId} already exists`);
+          }
           edges.push({
             id: op.operationId,
             sourceNodeId: op.payload.source.nodeId,
             targetNodeId: op.payload.target.nodeId,
             edgeType: op.payload.edgeType,
           });
+          edgeIds.add(op.operationId);
           break;
         }
         case 'delete_edge': {
+          if (!edgeIds.has(op.payload.edgeId)) {
+            throw new OperationValidationError('INVALID_REFERENCE', `edge ${op.payload.edgeId} does not exist`);
+          }
           for (let i = edges.length - 1; i >= 0; i -= 1) {
             if (edges[i].id === op.payload.edgeId) edges.splice(i, 1);
           }
+          edgeIds.delete(op.payload.edgeId);
           break;
         }
         case 'attach_asset':
         case 'replace_node_asset': {
+          this.requireNode(nodeIds, op.payload.nodeId);
           const node = nodes.find((n) => n.id === op.payload.nodeId);
           if (node) {
             node.data = {
@@ -197,16 +299,29 @@ export class InMemoryOperationsRepository implements OperationsRepository {
           }
           break;
         }
-        default:
-          // rotate/reorder/lock/group/ungroup/set_viewport/create_job：
-          // 快照模型不持久化这些字段（或由 worker/结果驱动），内存端只入版本。
-          break;
       }
     }
+  }
+
+  private async applyWithProject(
+    projectId: string,
+    request: ApplyOperationsRequest,
+  ): Promise<ApplyOperationsResponse> {
+    const snapshot = await this.projectRepository!.getSnapshot(projectId);
+    const currentVersion = snapshot.project.canvasVersion;
+    if (currentVersion !== request.baseVersion) {
+      throw new VersionConflictError(currentVersion);
+    }
+    this.validateBatch(request.operations);
+
+    const nodes = [...snapshot.nodes];
+    const edges = [...snapshot.edges];
+    // 批次内任何操作无效：副本丢弃、快照不变、版本不推进（回滚语义）
+    this.applyOperationsToCanvas(nodes, edges, request.operations);
 
     const canvasVersion = currentVersion + 1;
-    await this.projectRepository!.saveSnapshot(projectId, { nodes, edges });
-    await this.projectRepository!.bumpCanvasVersion(projectId, canvasVersion);
+    // 原子提交：节点/边与版本同一次写入，杜绝内容与版本不一致
+    await this.projectRepository!.commitSnapshot(projectId, { nodes, edges }, canvasVersion);
 
     return ApplyOperationsResponseSchema.parse({
       appliedOperationIds: request.operations.map(({ operationId }) => operationId),
@@ -275,6 +390,10 @@ function handleRepositoryError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof VersionConflictError) {
     sendError(response, 409, 'CANVAS_VERSION_CONFLICT', error.message, error.currentVersion);
+    return;
+  }
+  if (error instanceof OperationValidationError) {
+    sendError(response, 422, error.code, error.message);
     return;
   }
   sendError(response, 500, 'INTERNAL_ERROR', 'Unexpected server error');

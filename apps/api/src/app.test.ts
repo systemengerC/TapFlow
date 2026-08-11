@@ -139,3 +139,213 @@ test('POST operations maps missing caller authorization to 401', async () => {
   assert.equal(response.status, 401);
   assert.equal((await response.json()).error.code, 'UNAUTHORIZED');
 });
+
+// ---------- 内存画布模式（注入 projectRepository）下的并发 / 回滚 / 完整性校验 ----------
+
+const uuid = (n: number | string) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+
+async function startMemoryCanvas() {
+  const projectRepo = new InMemoryProjectRepository();
+  const repository = new InMemoryOperationsRepository(projectRepo);
+  const { baseUrl } = await start(repository, projectRepo);
+  const createProject = await fetch(`${baseUrl}/api/projects`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'canvas test' }),
+  });
+  const projectId = (await createProject.json()).id as string;
+  const postOps = (body: unknown) => fetch(`${baseUrl}/api/projects/${projectId}/operations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const getSnapshot = async () => {
+    const res = await fetch(`${baseUrl}/api/projects/${projectId}`);
+    return res.json() as Promise<{ project: { canvasVersion: number }; nodes: unknown[]; edges: unknown[] }>;
+  };
+  return { postOps, getSnapshot };
+}
+
+test('memory canvas: concurrent applies on the same baseVersion serialize and lose nothing', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const results = await Promise.all([...Array(10)].map((_, i) =>
+    postOps({
+      baseVersion: 0,
+      operations: [{
+        operationId: uuid(i),
+        type: 'create_node',
+        payload: { nodeType: 'text', position: { x: i, y: i } },
+      }],
+    }),
+  ));
+  const statuses = results.map((r) => r.status);
+  assert.equal(statuses.filter((s) => s === 200).length, 1, 'exactly one concurrent apply wins');
+  assert.equal(statuses.filter((s) => s === 409).length, 9, 'the rest get an optimistic lock conflict');
+
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.project.canvasVersion, 1);
+  assert.equal(snapshot.nodes.length, 1, 'no node is silently lost');
+  assert.deepEqual(snapshot.nodes[0], {
+    id: results.findIndex((r) => r.status === 200) >= 0 ? uuid(results.findIndex((r) => r.status === 200)) : null,
+    nodeType: 'text',
+    parentNodeId: null,
+    position: { x: results.findIndex((r) => r.status === 200), y: results.findIndex((r) => r.status === 200) },
+    size: null,
+    data: null,
+    jobId: null,
+  });
+});
+
+test('memory canvas: a batch with an invalid operation rolls back atomically', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const response = await postOps({
+    baseVersion: 0,
+    operations: [
+      { operationId: uuid('aaaa'), type: 'create_node', payload: { nodeType: 'text' } },
+      {
+        operationId: uuid('bbbb'),
+        type: 'create_edge',
+        payload: {
+          edgeType: 'reference',
+          source: { ref: 'node', nodeId: uuid('aaaa') },
+          target: { ref: 'node', nodeId: uuid('cafe') },
+        },
+      },
+    ],
+  });
+
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'INVALID_REFERENCE');
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.nodes.length, 0, 'first operation must not be committed');
+  assert.equal(snapshot.edges.length, 0);
+  assert.equal(snapshot.project.canvasVersion, 0, 'version must not advance on rollback');
+});
+
+test('memory canvas: rejects an invalid nodeType instead of poisoning the snapshot', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const response = await postOps({
+    baseVersion: 0,
+    operations: [{
+      operationId: OPERATION_ID,
+      type: 'create_node',
+      payload: { nodeType: 'bogus_type', position: { x: 0, y: 0 } },
+    }],
+  });
+
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'INVALID_NODE_TYPE');
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.nodes.length, 0);
+  assert.equal(snapshot.project.canvasVersion, 0);
+});
+
+test('memory canvas: refuses operations the snapshot cannot persist (no fake success)', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const response = await postOps({
+    baseVersion: 0,
+    operations: [{
+      operationId: OPERATION_ID,
+      type: 'set_viewport',
+      payload: { viewport: { x: 0, y: 0, zoom: 1 } },
+    }],
+  });
+
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'UNSUPPORTED_OPERATION');
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.nodes.length, 0);
+  assert.equal(snapshot.project.canvasVersion, 0, 'version must not advance without a real write');
+});
+
+test('memory canvas: version conflict wins over operation validation', async () => {
+  const { postOps } = await startMemoryCanvas();
+  await postOps({
+    baseVersion: 0,
+    operations: [{ operationId: uuid('a1'), type: 'create_node', payload: { nodeType: 'text' } }],
+  });
+
+  const response = await postOps({
+    baseVersion: 99,
+    operations: [{
+      operationId: OPERATION_ID,
+      type: 'set_viewport',
+      payload: { viewport: { x: 0, y: 0, zoom: 1 } },
+    }],
+  });
+
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, 'CANVAS_VERSION_CONFLICT');
+});
+
+test('memory canvas: rejects duplicate operation ids in one batch', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const response = await postOps({
+    baseVersion: 0,
+    operations: [
+      { operationId: OPERATION_ID, type: 'create_node', payload: { nodeType: 'text' } },
+      { operationId: OPERATION_ID, type: 'create_node', payload: { nodeType: 'image' } },
+    ],
+  });
+
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'DUPLICATE_OPERATION_ID');
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.nodes.length, 0);
+});
+
+test('memory canvas: rejects references to missing nodes and edges', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const missingNode = await postOps({
+    baseVersion: 0,
+    operations: [{ operationId: uuid('b1'), type: 'delete_node', payload: { nodeId: uuid('dead') } }],
+  });
+  assert.equal(missingNode.status, 422);
+  assert.equal((await missingNode.json()).error.code, 'INVALID_REFERENCE');
+
+  await postOps({
+    baseVersion: 0,
+    operations: [{ operationId: uuid('a1'), type: 'create_node', payload: { nodeType: 'text' } }],
+  });
+  const missingEdge = await postOps({
+    baseVersion: 1,
+    operations: [{ operationId: uuid('b2'), type: 'delete_edge', payload: { edgeId: uuid('beef') } }],
+  });
+  assert.equal(missingEdge.status, 422);
+  assert.equal((await missingEdge.json()).error.code, 'INVALID_REFERENCE');
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.project.canvasVersion, 1, 'failed ops must not advance the version');
+});
+
+test('memory canvas: a batch may reference nodes created earlier in the same batch', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const response = await postOps({
+    baseVersion: 0,
+    operations: [
+      { operationId: uuid('a1'), type: 'create_node', payload: { nodeType: 'text', position: { x: 0, y: 0 } } },
+      { operationId: uuid('a2'), type: 'create_node', payload: { nodeType: 'image', position: { x: 10, y: 0 } } },
+      {
+        operationId: uuid('c1'),
+        type: 'create_edge',
+        payload: {
+          edgeType: 'reference',
+          source: { ref: 'node', nodeId: uuid('a1') },
+          target: { ref: 'node', nodeId: uuid('a2') },
+        },
+      },
+    ],
+  });
+
+  assert.equal(response.status, 200);
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.nodes.length, 2);
+  assert.equal(snapshot.edges.length, 1);
+  assert.equal(snapshot.project.canvasVersion, 1);
+});
