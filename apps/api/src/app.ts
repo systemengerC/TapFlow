@@ -129,14 +129,21 @@ export class InMemoryOperationsRepository implements OperationsRepository {
     });
   }
 
-  /** promise 链互斥：前一个任务完成后才执行下一个；失败不影响后续任务。 */
+  /** promise 链互斥：前一个任务完成后才执行下一个；失败不影响后续任务。
+   *  任务链完成后安全清理 locks 条目，避免长期运行无界增长（tail 比较防止删除更新的链）。 */
   private async serialize<T>(projectId: string, task: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(projectId) ?? Promise.resolve();
-    const run = previous.then(async () => {
-      const result = await task();
-      return result;
-    });
-    this.locks.set(projectId, run.catch(() => undefined));
+    const run = previous.then(task, task);
+    const tail = run
+      .catch(() => undefined)
+      .finally(() => {
+        // 只有当前尾部仍是本任务的 tail 时才删除——若期间已有新任务入链，
+        // 新任务完成时由它自己清理
+        if (this.locks.get(projectId) === tail) {
+          this.locks.delete(projectId);
+        }
+      });
+    this.locks.set(projectId, tail);
     return run;
   }
 
@@ -188,10 +195,17 @@ export class InMemoryOperationsRepository implements OperationsRepository {
           if (nodeIds.has(op.operationId)) {
             throw new OperationValidationError('DUPLICATE_NODE_ID', `node id ${op.operationId} already exists`);
           }
+          const parentNodeId = op.payload.parentNodeId ?? null;
+          if (parentNodeId !== null && !nodeIds.has(parentNodeId)) {
+            throw new OperationValidationError(
+              'INVALID_REFERENCE',
+              `parent node ${parentNodeId} does not exist`,
+            );
+          }
           const node: ProjectSnapshotResponse['nodes'][number] = {
             id: op.operationId,
             nodeType: op.payload.nodeType as SnapshotNodeType,
-            parentNodeId: op.payload.parentNodeId ?? null,
+            parentNodeId,
             position: op.payload.position ?? { x: 0, y: 0 },
             size: op.payload.size
               ? { width: op.payload.size.x, height: op.payload.size.y }
@@ -314,8 +328,11 @@ export class InMemoryOperationsRepository implements OperationsRepository {
     }
     this.validateBatch(request.operations);
 
-    const nodes = [...snapshot.nodes];
-    const edges = [...snapshot.edges];
+    // 深拷贝候选快照：操作在副本上执行，任何失败抛错副本丢弃、快照不变。
+    // 浅拷贝只复制数组引用，update/move/resize/attach 会直接改共享节点对象，
+    // 后续操作失败时修改已泄漏进仓库（版本却不推进）——必须结构化克隆。
+    const nodes: ProjectSnapshotResponse['nodes'] = structuredClone(snapshot.nodes);
+    const edges: ProjectSnapshotResponse['edges'] = structuredClone(snapshot.edges);
     // 批次内任何操作无效：副本丢弃、快照不变、版本不推进（回滚语义）
     this.applyOperationsToCanvas(nodes, edges, request.operations);
 

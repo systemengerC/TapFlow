@@ -349,3 +349,117 @@ test('memory canvas: a batch may reference nodes created earlier in the same bat
   assert.equal(snapshot.edges.length, 1);
   assert.equal(snapshot.project.canvasVersion, 1);
 });
+
+test('memory canvas: mutations to existing nodes are rolled back when a later op fails (deep-copy)', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  // v1: create a node with data
+  const createResponse = await postOps({
+    baseVersion: 0,
+    operations: [{
+      operationId: uuid(1),
+      type: 'create_node',
+      payload: { nodeType: 'text', data: { content: 'original' } },
+    }],
+  });
+  assert.equal(createResponse.status, 200);
+
+  // v2 batch: first mutate the existing node, then fail on a missing reference
+  const failed = await postOps({
+    baseVersion: 1,
+    operations: [
+      { operationId: uuid(2), type: 'update_node', payload: { nodeId: uuid(1), patch: { content: 'HACKED' } } },
+      { operationId: uuid(3), type: 'delete_node', payload: { nodeId: uuid('dead') } },
+    ],
+  });
+  assert.equal(failed.status, 422);
+
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.project.canvasVersion, 1, 'version must not advance on rollback');
+  const node = (snapshot.nodes as Array<{ id: string; data: { content: string } | null }>)
+    .find((n) => n.id === uuid(1));
+  assert.ok(node, 'the node still exists');
+  assert.deepEqual(node.data, { content: 'original' }, 'mutation must not leak into the store');
+});
+
+test('memory canvas: create_node rejects a parentNodeId that does not exist', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const response = await postOps({
+    baseVersion: 0,
+    operations: [{
+      operationId: uuid(1),
+      type: 'create_node',
+      payload: { nodeType: 'text', parentNodeId: uuid('cafe') },
+    }],
+  });
+
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'INVALID_REFERENCE');
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.nodes.length, 0);
+  assert.equal(snapshot.project.canvasVersion, 0);
+});
+
+test('memory canvas: a batch may attach a child to a parent created earlier in the same batch', async () => {
+  const { postOps, getSnapshot } = await startMemoryCanvas();
+
+  const response = await postOps({
+    baseVersion: 0,
+    operations: [
+      { operationId: uuid(1), type: 'create_node', payload: { nodeType: 'group', position: { x: 0, y: 0 } } },
+      {
+        operationId: uuid(2),
+        type: 'create_node',
+        payload: { nodeType: 'text', parentNodeId: uuid(1), position: { x: 5, y: 5 } },
+      },
+    ],
+  });
+
+  assert.equal(response.status, 200);
+  const snapshot = await getSnapshot();
+  assert.equal(snapshot.nodes.length, 2);
+  const child = (snapshot.nodes as Array<{ id: string; parentNodeId: string | null }>)
+    .find((n) => n.id === uuid(2));
+  assert.equal(child?.parentNodeId, uuid(1), 'parent reference resolved within the batch');
+});
+
+test('memory canvas: lock entries are released after apply settles (no unbounded growth)', async () => {
+  const projectRepo = new InMemoryProjectRepository();
+  const repository = new InMemoryOperationsRepository(projectRepo);
+  const { baseUrl } = await start(repository, projectRepo);
+  const createProject = await fetch(`${baseUrl}/api/projects`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'lock test' }),
+  });
+  const projectId = (await createProject.json()).id as string;
+  const postOps = (body: unknown) => fetch(`${baseUrl}/api/projects/${projectId}/operations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  // a successful apply, then a failed apply, then another successful apply
+  const ok1 = await postOps({
+    baseVersion: 0,
+    operations: [{ operationId: uuid(1), type: 'create_node', payload: { nodeType: 'text' } }],
+  });
+  assert.equal(ok1.status, 200);
+
+  const fail = await postOps({
+    baseVersion: 1,
+    operations: [{ operationId: uuid(2), type: 'delete_node', payload: { nodeId: uuid('dead') } }],
+  });
+  assert.equal(fail.status, 422);
+
+  const ok2 = await postOps({
+    baseVersion: 1,
+    operations: [{ operationId: uuid(3), type: 'create_node', payload: { nodeType: 'image' } }],
+  });
+  assert.equal(ok2.status, 200);
+
+  // after all applies settle, the lock map must be empty again
+  assert.equal((repository as unknown as { locks: Map<string, unknown> }).locks.size, 0,
+    'lock map must not accumulate entries');
+});
