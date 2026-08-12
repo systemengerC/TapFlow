@@ -45,7 +45,7 @@ function makeRepo(routes: Record<string, (init: RequestInit) => Response>) {
   });
 }
 
-test('presign calls create_upload_session RPC and returns a real object URL', async () => {
+test('presign calls create_upload_session RPC and returns an authenticated object URL without serviceKey', async () => {
   let calledBody: any = null;
   let calledHeaders: any = null;
   const repo = makeRepo({
@@ -75,6 +75,37 @@ test('presign calls create_upload_session RPC and returns a real object URL', as
   assert.equal(result.url, `${SUPABASE_URL}/storage/v1/object/uploads/${UPLOAD_ID}/upload.png`);
   assert.equal(new Headers(calledHeaders).get('authorization'), 'Bearer test-jwt');
   assert.equal(result.headers['Content-Type'], 'image/png');
+  assert.equal(result.headers.apikey, ANON_KEY);
+  assert.equal(result.headers.Authorization, 'Bearer test-jwt');
+});
+
+test('presign accepts Supabase signedURL response and normalizes relative URLs', async () => {
+  let signedRequest: RequestInit | undefined;
+  const repo = new SupabaseUploadRepository({
+    supabaseUrl: SUPABASE_URL,
+    anonKey: ANON_KEY,
+    serviceKey: 'service-role-key',
+    fetcher: mockFetch({
+      'rpc/create_upload_session': () =>
+        jsonResponse([{ storage_bucket: 'uploads', storage_path: `${UPLOAD_ID}/upload.png` }]),
+      'storage/v1/object/upload/sign/uploads': (init) => {
+        signedRequest = init;
+        return jsonResponse({ signedURL: `/object/upload/sign/uploads/${UPLOAD_ID}/upload.png?token=test-token` });
+      },
+    }) as typeof fetch,
+  });
+
+  const result = await repo.presign({
+    projectId: PROJECT_ID as any,
+    assetType: 'image',
+    mimeType: 'image/png',
+    sizeBytes: 10,
+  }, 'Bearer test-jwt');
+
+  assert.equal(result.url, `${SUPABASE_URL}/storage/v1/object/upload/sign/uploads/${UPLOAD_ID}/upload.png?token=test-token`);
+  assert.equal(result.headers['Content-Type'], 'image/png');
+  assert.equal(result.headers.apikey, undefined);
+  assert.equal(new Headers(signedRequest?.headers).get('authorization'), 'Bearer service-role-key');
 });
 
 test('presign rejects unsupported MIME with 415', async () => {

@@ -128,7 +128,7 @@ export class SupabaseUploadRepository implements UploadRepository {
     // 2) 返回直传 URL（阻断项 4）：
     //    - 配置了 serviceKey：调 Storage createSignedUploadUrl 返回签名上传 URL，
     //      客户端 PUT 仅需 Content-Type（token 内置于 URL），无需 apikey/authorization
-    //    - 未配置（联调）：返回对象 URL，客户端需带 apikey + Authorization 头
+    //    - 未配置（联调）：返回对象 URL，并把 apikey + Authorization 交给客户端
     let url: string;
     let headers: Record<string, string>;
     if (this.serviceKey) {
@@ -147,16 +147,27 @@ export class SupabaseUploadRepository implements UploadRepository {
         const error = await signResponse.json().catch(() => ({})) as SupabaseError;
         throw new Error(error.message ?? `Failed to create signed upload URL: HTTP ${signResponse.status}`);
       }
-      const signResult = await signResponse.json() as { signedUrl?: string; url?: string; token?: string };
-      const signedUrl = signResult.signedUrl ?? signResult.url;
+      const signResult = await signResponse.json() as {
+        signedURL?: string;
+        signedUrl?: string;
+        url?: string;
+        token?: string;
+      };
+      const signedUrl = signResult.signedURL ?? signResult.signedUrl ?? signResult.url;
       if (!signedUrl) {
         throw new Error('createSignedUploadUrl returned no signed URL');
       }
-      url = signedUrl;
+      url = /^https?:\/\//i.test(signedUrl)
+        ? signedUrl
+        : `${this.baseUrl}/storage/v1/${signedUrl.replace(/^\/+/, '')}`;
       headers = { 'Content-Type': request.mimeType };
     } else {
       url = `${this.baseUrl}/storage/v1/object/${storageBucket}/${persistedPath}`;
-      headers = { 'Content-Type': request.mimeType };
+      headers = {
+        'Content-Type': request.mimeType,
+        apikey: this.anonKey,
+        Authorization: authorization,
+      };
     }
 
     return {
