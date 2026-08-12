@@ -14,7 +14,7 @@ import { SupabaseJobRepository } from './supabaseJobRepository.ts';
 import { SupabaseOperationsRepository } from './supabaseOperationsRepository.ts';
 import { SupabaseProjectRepository } from './supabaseProjectRepository.ts';
 import { SupabaseUploadRepository } from './supabaseUploadRepository.ts';
-import { SupabaseWorkerStore } from './supabaseWorkerStore.ts';
+import { SupabaseWorkerStore } from '../../worker/src/supabaseWorkerStore.ts';
 import { InMemoryWorkerStore } from '../../worker/src/workerStore.ts';
 
 export type RuntimeConfig = {
@@ -47,7 +47,11 @@ export function buildRuntime(config: RuntimeConfig = {}): Runtime {
     // 内存模式：注入同一个 projectRepository，让 operations 真正写入画布快照
     : new InMemoryOperationsRepository(projectRepository as InMemoryProjectRepository);
   const uploadRepository = useSupabase
-    ? new SupabaseUploadRepository({ supabaseUrl: supabaseUrl!, anonKey: supabaseAnonKey! })
+    ? new SupabaseUploadRepository({
+        supabaseUrl: supabaseUrl!,
+        anonKey: supabaseAnonKey!,
+        serviceKey: supabaseServiceKey,
+      })
     : new InMemoryUploadRepository();
   const jobRepository = useSupabase
     ? new SupabaseJobRepository({ supabaseUrl: supabaseUrl!, anonKey: supabaseAnonKey! })

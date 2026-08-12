@@ -24,6 +24,7 @@ import {
 type Options = {
   supabaseUrl: string;
   anonKey: string;
+  serviceKey?: string;
   fetcher?: typeof fetch;
 };
 
@@ -60,11 +61,13 @@ type UploadSessionRow = {
 export class SupabaseUploadRepository implements UploadRepository {
   private readonly baseUrl: string;
   private readonly anonKey: string;
+  private readonly serviceKey: string | undefined;
   private readonly fetcher: typeof fetch;
 
-  constructor({ supabaseUrl, anonKey, fetcher = fetch }: Options) {
+  constructor({ supabaseUrl, anonKey, serviceKey, fetcher = fetch }: Options) {
     this.baseUrl = supabaseUrl.replace(/\/$/, '');
     this.anonKey = anonKey;
+    this.serviceKey = serviceKey;
     this.fetcher = fetcher;
   }
 
@@ -119,18 +122,50 @@ export class SupabaseUploadRepository implements UploadRepository {
       throw new Error('create_upload_session returned no rows');
     }
 
-    // 2) 返回存储对象 URL（客户端 PUT 直传；storage.objects RLS 放行 pending session owner）
-    //    注：对象 URL 直传需要客户端带 apikey + Authorization；若部署配置了 service role，
-    //    可替换为 storage 签名上传 URL（见 02-签名URL规范）。
-    const url = `${this.baseUrl}/storage/v1/object/${rows[0].storage_bucket}/${rows[0].storage_path}`;
+    const storageBucket = rows[0].storage_bucket;
+    const persistedPath = rows[0].storage_path;
+
+    // 2) 返回直传 URL（阻断项 4）：
+    //    - 配置了 serviceKey：调 Storage createSignedUploadUrl 返回签名上传 URL，
+    //      客户端 PUT 仅需 Content-Type（token 内置于 URL），无需 apikey/authorization
+    //    - 未配置（联调）：返回对象 URL，客户端需带 apikey + Authorization 头
+    let url: string;
+    let headers: Record<string, string>;
+    if (this.serviceKey) {
+      const signResponse = await this.fetcher(
+        `${this.baseUrl}/storage/v1/object/upload/sign/${storageBucket}/${persistedPath}`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.serviceKey}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ expiresIn }),
+        },
+      );
+      if (!signResponse.ok) {
+        const error = await signResponse.json().catch(() => ({})) as SupabaseError;
+        throw new Error(error.message ?? `Failed to create signed upload URL: HTTP ${signResponse.status}`);
+      }
+      const signResult = await signResponse.json() as { signedUrl?: string; url?: string; token?: string };
+      const signedUrl = signResult.signedUrl ?? signResult.url;
+      if (!signedUrl) {
+        throw new Error('createSignedUploadUrl returned no signed URL');
+      }
+      url = signedUrl;
+      headers = { 'Content-Type': request.mimeType };
+    } else {
+      url = `${this.baseUrl}/storage/v1/object/${storageBucket}/${persistedPath}`;
+      headers = { 'Content-Type': request.mimeType };
+    }
 
     return {
       uploadId,
       url,
-      headers: { 'Content-Type': request.mimeType },
+      headers,
       expiresIn,
       expiresAt,
-      storagePath,
+      storagePath: persistedPath,
     };
   }
 

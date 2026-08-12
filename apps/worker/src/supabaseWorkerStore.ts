@@ -9,9 +9,9 @@
  */
 import type { Job, JobStatus, Uuid } from '@tapflow/contracts';
 
-import type { ProviderOutput } from '../../worker/src/provider.ts';
-import type { JobOutput, WorkerStore } from '../../worker/src/workerStore.ts';
-import { JobNotFoundError, JobStateTransitionError } from '../../worker/src/workerStore.ts';
+import type { ProviderOutput } from './provider.ts';
+import type { JobOutput, WorkerStore } from './workerStore.ts';
+import { JobNotFoundError, JobStateTransitionError } from './workerStore.ts';
 
 type Options = {
   supabaseUrl: string;
@@ -55,6 +55,28 @@ type OutputRow = {
 const JOB_SELECT =
   'id,project_id,parent_job_id,attempt,job_type,provider,model,params,input_node_ids,status,provider_job_id,error_code,error_message,idempotency_key,cancel_requested_at,finished_at,created_at,updated_at';
 
+/** 转存到 generated bucket 时的对象扩展名 */
+const MIME_EXTENSION: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/svg+xml': 'svg',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+  'application/pdf': 'pdf',
+};
+
+/** 转存失败：runner 捕获后以 ASSET_TRANSFER_FAILED 终结 Job（03 契约 §5） */
+export class AssetTransferError extends Error {
+  constructor(message: string) {
+    super(`asset transfer failed: ${message}`);
+    this.name = 'AssetTransferError';
+  }
+}
+
 export class SupabaseWorkerStore implements WorkerStore {
   private readonly baseUrl: string;
   private readonly anonKey: string;
@@ -81,9 +103,14 @@ export class SupabaseWorkerStore implements WorkerStore {
   }
 
   async complete(jobId: string, outputs: ProviderOutput[]): Promise<{ job: Job; outputs: JobOutput[] }> {
+    // 生产模式（serviceKey）：先把 provider 输出真实转存到 generated bucket，
+    // 再以转存后的对象路径完成 Job（阻断项 6：不允许把 provider URL 当 storage_path 落库）。
+    // 联调模式（无 serviceKey）：透传原样（FakeProvider 输出仅供单测/内存模式）。
+    const persisted = this.serviceKey ? await this.transferOutputs(jobId, outputs) : outputs;
+
     const rows = await this.fetchRpc<Array<{ job: JobRow }>>('complete_generation_job', {
       p_job_id: jobId,
-      p_outputs: outputs.map((output) => ({
+      p_outputs: persisted.map((output) => ({
         url: output.url,
         mimeType: output.mimeType,
         width: output.width ?? null,
@@ -96,11 +123,11 @@ export class SupabaseWorkerStore implements WorkerStore {
     }
     const job = this.toJob(row.job);
 
-    // 读取落库输出（assetId/ordinal），url/mimeType 以 provider 返回为准
+    // 读取落库输出（assetId/ordinal），url/mimeType 以转存后的结果为准
     const outputRows = await this.fetchGet<OutputRow[]>(
       `/rest/v1/generation_job_outputs?job_id=eq.${encodeURIComponent(jobId)}&select=id,asset_id,ordinal&order=ordinal.asc`,
     );
-    const written: JobOutput[] = outputs.map((output, index) => {
+    const written: JobOutput[] = persisted.map((output, index) => {
       const rowOut = outputRows[index];
       return {
         id: (rowOut?.id ?? jobId) as Uuid,
@@ -113,6 +140,46 @@ export class SupabaseWorkerStore implements WorkerStore {
       };
     });
     return { job, outputs: written };
+  }
+
+  /**
+   * 转存 provider 输出到 generated bucket。
+   * 每个输出：GET provider url → PUT storage object（generated/{jobId}/{ordinal}.{ext}）。
+   * 非 http(s) 路径（已是对象路径）原样透传。任一失败抛 AssetTransferError。
+   */
+  private async transferOutputs(jobId: string, outputs: ProviderOutput[]): Promise<ProviderOutput[]> {
+    const transferred: ProviderOutput[] = [];
+    for (let index = 0; index < outputs.length; index += 1) {
+      const output = outputs[index];
+      if (!/^https?:\/\//i.test(output.url)) {
+        transferred.push(output);
+        continue;
+      }
+      const extension = MIME_EXTENSION[output.mimeType] ?? 'bin';
+      const storagePath = `${jobId}/${index}.${extension}`;
+
+      const source = await this.fetcher(output.url);
+      if (!source.ok) {
+        throw new AssetTransferError(`download ${output.url} failed (HTTP ${source.status})`);
+      }
+      const buffer = Buffer.from(await source.arrayBuffer());
+
+      const upload = await this.fetcher(`${this.baseUrl}/storage/v1/object/generated/${storagePath}`, {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${this.serviceKey}`,
+          'content-type': output.mimeType,
+          'x-upsert': 'false',
+        },
+        body: buffer,
+      });
+      if (!upload.ok) {
+        throw new AssetTransferError(`upload generated/${storagePath} failed (HTTP ${upload.status})`);
+      }
+
+      transferred.push({ ...output, url: storagePath });
+    }
+    return transferred;
   }
 
   async fail(jobId: string, errorCode: string, errorMessage: string): Promise<Job> {

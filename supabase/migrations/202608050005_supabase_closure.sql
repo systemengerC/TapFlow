@@ -283,6 +283,13 @@ begin
   end;
 
   for v_out in select * from jsonb_array_elements(coalesce(p_outputs, '[]'::jsonb)) loop
+    -- 阻断项 6 fail-closed：生成输出必须已由 worker 转存到 generated bucket，
+    -- provider URL 不得当作 storage_path 落库（否则 bucket/path 与真实对象不一致）。
+    -- worker 未配置 service key 转存时，此校验直接拒绝完成，由 runner 记 ASSET_TRANSFER_FAILED。
+    if v_out->>'url' ~ '^https?://' then
+      raise exception 'ASSET_TRANSFER_REQUIRED: provider URL % must be transferred to generated bucket before completing', v_out->>'url' using errcode = 'P0001';
+    end if;
+
     insert into assets
       (project_id, user_id, asset_type, storage_bucket, storage_path,
        size_bytes, width, height)
@@ -470,7 +477,8 @@ begin
   end if;
 
   -- 项目归属校验：只能为本人项目创建上传会话
-  if not exists (select 1 from projects where id = p_project_id and user_id = auth.uid()) then
+  -- （returns table 输出列 id 与 projects.id 同名，需显式限定表名避免歧义）
+  if not exists (select 1 from projects where projects.id = p_project_id and projects.user_id = auth.uid()) then
     raise exception 'FORBIDDEN: project does not belong to caller' using errcode = '42501';
   end if;
 
@@ -496,6 +504,10 @@ grant execute on function create_upload_session(uuid, text, text, bigint, int, i
 -- 由调用方显式指定 service 用户），p_user_id 参数改为 p_owner_id 且仅
 -- service_role/tapflow_worker 可传入非空值。
 -- ---------------------------------------------------------------------------
+-- 002 旧签名使用 p_user_id；005 改为 p_owner_id（P0-E：不信任客户端归属）。
+-- create or replace 不允许修改参数名，先 drop 旧函数再创建。
+drop function if exists complete_upload(uuid, uuid, uuid, text, text, text, text, bigint, int, int);
+
 create or replace function complete_upload(
   p_upload_id   uuid,
   p_project_id  uuid,
@@ -588,6 +600,7 @@ grant execute on function complete_upload(uuid, uuid, uuid, text, text, text, te
 alter table storage.objects enable row level security;
 
 -- 读：项目内已 complete 的资产（uploads/generated/thumbs）可被 owner 读取
+drop policy if exists storage_objects_read_owner on storage.objects;
 create policy storage_objects_read_owner on storage.objects
   for select to authenticated
   using (
@@ -601,6 +614,7 @@ create policy storage_objects_read_owner on storage.objects
   );
 
 -- 写：uploads 桶内，已创建 pending 会话的 path 允许本人写入
+drop policy if exists storage_objects_insert_owner on storage.objects;
 create policy storage_objects_insert_owner on storage.objects
   for insert to authenticated
   with check (
@@ -614,6 +628,7 @@ create policy storage_objects_insert_owner on storage.objects
     )
   );
 
+drop policy if exists storage_objects_update_owner on storage.objects;
 create policy storage_objects_update_owner on storage.objects
   for update to authenticated
   using (

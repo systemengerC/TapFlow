@@ -5,8 +5,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { SupabaseWorkerStore } from './supabaseWorkerStore.ts';
-import { JobNotFoundError, JobStateTransitionError } from '../../worker/src/workerStore.ts';
+import { AssetTransferError, SupabaseWorkerStore } from './supabaseWorkerStore.ts';
+import { JobNotFoundError, JobStateTransitionError } from './workerStore.ts';
 
 const SUPABASE_URL = 'https://example.supabase.co';
 const ANON_KEY = 'anon-key';
@@ -33,12 +33,12 @@ const JOB_ROW = {
   updated_at: '2026-08-07T00:00:00.000Z',
 };
 
-function mockFetch(routes: Record<string, (init: RequestInit) => Response>) {
+function mockFetch(routes: Record<string, (init: RequestInit, url: string) => Response>) {
   return async (input: any, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     for (const [pattern, handler] of Object.entries(routes)) {
       if (url.includes(pattern)) {
-        return handler(init ?? {});
+        return handler(init ?? {}, url);
       }
     }
     throw new Error(`Unexpected fetch: ${url}`);
@@ -52,7 +52,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function makeStore(routes: Record<string, (init: RequestInit) => Response>, serviceKey?: string) {
+function makeStore(routes: Record<string, (init: RequestInit, url: string) => Response>, serviceKey?: string) {
   return new SupabaseWorkerStore({
     supabaseUrl: SUPABASE_URL,
     anonKey: ANON_KEY,
@@ -202,4 +202,135 @@ test('uses anon key headers when no service key is configured', async () => {
   const headers = new Headers(calledHeaders);
   assert.equal(headers.get('apikey'), ANON_KEY);
   assert.equal(headers.get('authorization'), null);
+});
+
+// ---------------------------------------------------------------------------
+// 转存分支（serviceKey 模式）：provider URL → generated bucket（阻断项 6）
+// ---------------------------------------------------------------------------
+
+const PNG_BYTES: Uint8Array<ArrayBuffer> = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+function binaryResponse(body: Uint8Array<ArrayBuffer>, status = 200): Response {
+  return new Response(new Blob([body]), { status });
+}
+
+test('complete with serviceKey transfers http outputs to generated bucket before RPC', async () => {
+  const calls: Array<{ url: string; init: RequestInit; requestUrl?: string }> = [];
+  let rpcBody: any = null;
+  const store = makeStore({
+    'fake.local/outputs/0.png': (init) => {
+      calls.push({ url: 'download', init });
+      return binaryResponse(PNG_BYTES);
+    },
+    'storage/v1/object/generated/': (init, url) => {
+      calls.push({ url: 'upload', init, requestUrl: url });
+      return new Response(null, { status: 200 });
+    },
+    'rpc/complete_generation_job': (init) => {
+      rpcBody = JSON.parse(String(init.body));
+      return jsonResponse([{ job: { ...JOB_ROW, status: 'succeeded' } }]);
+    },
+    'generation_job_outputs': () =>
+      jsonResponse([
+        { id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', asset_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', ordinal: 0 },
+      ]),
+  }, SERVICE_KEY);
+
+  const result = await store.complete(JOB_ROW.id, [
+    { url: 'https://fake.local/outputs/0.png', mimeType: 'image/png', width: 1024, height: 1024 },
+  ]);
+
+  assert.equal(calls.filter((c) => c.url === 'download').length, 1, 'provider output downloaded once');
+  assert.equal(calls.filter((c) => c.url === 'upload').length, 1, 'storage PUT issued once');
+
+  const upload = calls.find((c) => c.url === 'upload')!;
+  const uploadUrl = upload.requestUrl ?? '';
+  assert.ok(
+    uploadUrl.includes('generated/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/0.png'),
+    `PUT URL should be generated/{jobId}/0.png, got: ${uploadUrl}`,
+  );
+  const uploadHeaders = new Headers(upload.init?.headers);
+  assert.equal(uploadHeaders.get('authorization'), `Bearer ${SERVICE_KEY}`);
+  assert.equal(uploadHeaders.get('content-type'), 'image/png');
+  assert.equal(uploadHeaders.get('x-upsert'), 'false');
+
+  // RPC 收到的是转存后的对象路径，而不是 provider URL（fail-closed 前提）
+  assert.deepEqual(rpcBody.p_outputs, [
+    { url: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/0.png', mimeType: 'image/png', width: 1024, height: 1024 },
+  ]);
+  assert.equal(result.outputs[0].url, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/0.png');
+});
+
+test('complete with serviceKey passes non-http paths through without transfer', async () => {
+  const unexpected: string[] = [];
+  const store = makeStore({
+    'rpc/complete_generation_job': (init) => {
+      const body = JSON.parse(String(init.body));
+      assert.equal(body.p_outputs[0].url, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/0.png');
+      return jsonResponse([{ job: { ...JOB_ROW, status: 'succeeded' } }]);
+    },
+    'generation_job_outputs': () =>
+      jsonResponse([
+        { id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', asset_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', ordinal: 0 },
+      ]),
+    'storage/v1/object/': () => {
+      unexpected.push('storage PUT should not fire for non-http path');
+      return new Response(null, { status: 200 });
+    },
+  }, SERVICE_KEY);
+
+  const result = await store.complete(JOB_ROW.id, [
+    { url: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/0.png', mimeType: 'image/png', width: 1024, height: 1024 },
+  ]);
+
+  assert.deepEqual(unexpected, [], 'no storage PUT for already-transferred path');
+  assert.equal(result.outputs[0].url, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/0.png');
+});
+
+test('complete without serviceKey passes provider URL through unchanged (联调模式)', async () => {
+  let rpcBody: any = null;
+  const store = makeStore({
+    'rpc/complete_generation_job': (init) => {
+      rpcBody = JSON.parse(String(init.body));
+      return jsonResponse([{ job: { ...JOB_ROW, status: 'succeeded' } }]);
+    },
+    'generation_job_outputs': () =>
+      jsonResponse([
+        { id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', asset_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', ordinal: 0 },
+      ]),
+  });
+
+  const result = await store.complete(JOB_ROW.id, [
+    { url: 'https://fake.local/outputs/0.png', mimeType: 'image/png', width: 1024, height: 1024 },
+  ]);
+
+  assert.deepEqual(rpcBody.p_outputs, [
+    { url: 'https://fake.local/outputs/0.png', mimeType: 'image/png', width: 1024, height: 1024 },
+  ]);
+  assert.equal(result.outputs[0].url, 'https://fake.local/outputs/0.png');
+});
+
+test('transfer failure: provider download error throws AssetTransferError', async () => {
+  const store = makeStore({
+    'fake.local/outputs/0.png': () => new Response(null, { status: 502 }),
+  }, SERVICE_KEY);
+
+  await assert.rejects(
+    () =>
+      store.complete(JOB_ROW.id, [{ url: 'https://fake.local/outputs/0.png', mimeType: 'image/png' }]),
+    (err: unknown) => err instanceof AssetTransferError && /download .*HTTP 502/.test(String(err)),
+  );
+});
+
+test('transfer failure: storage upload error throws AssetTransferError', async () => {
+  const store = makeStore({
+    'fake.local/outputs/0.png': () => binaryResponse(PNG_BYTES),
+    'storage/v1/object/generated/': () => new Response(null, { status: 403 }),
+  }, SERVICE_KEY);
+
+  await assert.rejects(
+    () =>
+      store.complete(JOB_ROW.id, [{ url: 'https://fake.local/outputs/0.png', mimeType: 'image/png' }]),
+    (err: unknown) => err instanceof AssetTransferError && /upload generated\/.*HTTP 403/.test(String(err)),
+  );
 });
