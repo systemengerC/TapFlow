@@ -1,6 +1,6 @@
 # TapFlow Progress
 
-Last reviewed: 2026-08-12 (deepseek backend lane verified)
+Last reviewed: 2026-08-12 (gpt integration review)
 
 ## Current State
 
@@ -10,17 +10,17 @@ Last reviewed: 2026-08-12 (deepseek backend lane verified)
 | P0 upload completion and `asset_type` | Done (backend) | `complete_upload` uses session `asset_type` (P0-2); `SupabaseUploadRepository` supports signed upload URL (serviceKey mode); presign/PUT/complete auth path covered by API tests + PG closure T1/T2/T3. |
 | P0 generation completion SQL | Done (backend) | Migration 005: `complete_generation_job` returns updated row (`returning *`), `resize_nodes` numeric cast, `ASSET_TRANSFER_REQUIRED` fail-closed. Verified against real PostgreSQL 17.9 via podman: full chain setup→001→002→003→005→closure, 26 PASS, exit=0. |
 | Worker asset transfer (serviceKey) | Done (backend) | `SupabaseWorkerStore.transferOutputs` downloads provider output → PUT `generated/{jobId}/{ordinal}.{ext}` → RPC receives object path. 5 new transfer tests added (transfer, passthrough, no-serviceKey passthrough, download failure, upload failure). Worker tests 24/24, tsc clean. |
-| Web retry and duplicate-submit protection | In progress (cc lane) | Retry controller and related Web changes present in working tree; final suite and diff review remain. |
-| Web single/multi-node deletion | In progress (cc lane) | Delete helpers and component tests are present; final suite and diff review remain. |
+| Web retry and duplicate-submit protection | Done | `retryController` deduplicates in-flight retries by job ID, clears stale errors, and rebuilds requests without the old idempotency key. Covered by controller and `JobCard` tests. |
+| Web single/multi-node deletion | Done | Shared delete helper removes selected nodes and dangling edges; `PropertiesPanelView` exposes single/multi-delete UI and interaction tests. |
 | Persistent asset URL / media preview | Blocked | Backend contract does not yet expose a persistent asset URL or `GET /api/assets/:id`; do not mark complete until that contract exists. |
-| Release gates | Pending (gpt) | Run full tests, typecheck, lint, build, inspect diff, then commit/push as requested. |
+| Release gates | Passed locally; push pending | Web: 44/44 tests, typecheck, lint, production build. API: 64/64 tests, typecheck. Worker: 24/24 tests, typecheck. Real PG closure: 26 PASS. Commit-level review found and fixed signed upload response/auth headers. |
 
 ## Verified Git State At Review
 
 - Branch: `main`
-- Ahead of `origin/main`: 3 commits (unpushed)
-- Working tree: backend lane changes verified but **not yet committed** (API runtime/upload repo, Worker store+entrypoint+tests, Supabase migration 005 + closure tests).
-- Latest known relevant commit: `d092d3c fix(api,supabase): wire SupabaseWorkerStore into runtime, fix complete_upload asset_type and worker RPC output (P0)`
+- Ahead of `origin/main`: 6 commits (unpushed before this progress update).
+- Working tree: clean before this progress update; backend and Web lanes are committed separately.
+- Relevant commits: `77770bd` backend/worker/Supabase closure, `c5ecce6` upload signing/auth follow-up, `c77a181` Web retry/delete regression coverage.
 
 ## Verified Test Evidence (backend lane, 2026-08-12)
 
@@ -34,6 +34,7 @@ Last reviewed: 2026-08-12 (deepseek backend lane verified)
 1. [x] Review uncommitted changes; resolve incomplete edits (actor check constraint + `raise notice` top-level SQL fixed in closure tests).
 2. [x] Verify independent Worker entrypoint and Supabase runtime wiring.
 3. [x] Execute upload/storage and generation closure tests against real PostgreSQL.
-4. [ ] Finish Web retry/delete regression coverage and run Web checks (cc lane).
+4. [x] Finish Web retry/delete regression coverage and run Web checks.
 5. [ ] Implement persistent asset URL/API and media preview after the backend contract is available (blocked).
-6. [ ] Run repository release gates, inspect final diff, commit, and push (gpt).
+6. [x] Run repository release gates and inspect final diffs.
+7. [ ] Push reviewed commits to `origin/main`.
