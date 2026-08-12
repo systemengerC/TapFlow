@@ -3,10 +3,11 @@
  */
 'use client';
 
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { useJobs } from '@/lib/hooks/useJobs';
 import CreateJobForm from '@/components/ui/CreateJobForm';
 import type { Job, Uuid, JobType } from '@tapflow/contracts';
+import { createRetryController } from '@/lib/jobs/retryController';
 
 interface JobsPanelProps {
   projectId: string | null;
@@ -65,11 +66,29 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
       params: Record<string, unknown>;
       inputNodeIds: string[];
     }) => {
-      if (!projectId) return;
+      if (!projectId) return null;
       const jobId = await createJob(formData);
       if (jobId) startPolling(jobId);
+      // 返回 jobId 供重试控制器判定成败（null → 展示提交失败）
+      return jobId;
     },
     [projectId, createJob, startPolling],
+  );
+
+  const retryController = useMemo(
+    () =>
+      createRetryController(async (request) => {
+        return handleCreateJob(request);
+      }),
+    [handleCreateJob],
+  );
+  const [, forceRetryRender] = useState(0);
+
+  useEffect(() => retryController.subscribe(() => forceRetryRender((n) => n + 1)), [retryController]);
+
+  const handleRetry = useCallback(
+    (job: Job) => retryController.retry(job),
+    [retryController],
   );
 
   const handleCancel = useCallback(
@@ -135,26 +154,34 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {jobs.map((job) => (
-          <JobCard key={job.id} job={job} onCancel={handleCancel} onRetry={handleCreateJob} />
+          <JobCard
+            key={job.id}
+            job={job}
+            onCancel={handleCancel}
+            onRetry={handleRetry}
+            retrySubmitting={retryController.isSubmitting(job.id)}
+            retryError={retryController.errorFor(job.id)}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function JobCard({
+export function JobCard({
   job,
   onCancel,
   onRetry,
+  retrySubmitting = false,
+  retryError = null,
 }: {
   job: Job;
   onCancel: (id: Uuid) => void;
-  onRetry?: (formData: {
-    jobType: JobType;
-    model: string;
-    params: Record<string, unknown>;
-    inputNodeIds: string[];
-  }) => void;
+  onRetry?: (job: Job) => void | Promise<void>;
+  /** 该 job 的重试是否在途（在途时禁用按钮，防止连点创建重复 job） */
+  retrySubmitting?: boolean;
+  /** 重试提交失败信息，null 表示无错误 */
+  retryError?: string | null;
 }) {
   const statusColor = {
     queued: '#8a8a9a',
@@ -198,29 +225,31 @@ function JobCard({
         <div style={{ color: '#e08090', fontSize: 11 }}>错误: {job.errorMessage}</div>
       )}
 
+      {retryError && (
+        <div role="alert" style={{ color: '#e08090', fontSize: 11 }}>
+          重试失败: {retryError}
+        </div>
+      )}
+
       {job.status === 'failed' && onRetry && (
         <button
-          onClick={() => {
-            onRetry({
-              jobType: job.jobType,
-              model: job.model,
-              params: job.params as Record<string, unknown>,
-              inputNodeIds: job.inputNodeIds,
-            });
-          }}
+          type="button"
+          disabled={retrySubmitting}
+          onClick={() => void onRetry(job)}
           style={{
             padding: '4px 8px',
             background: '#3a3a4a',
             color: '#5a9aef',
             border: 'none',
             borderRadius: 4,
-            cursor: 'pointer',
+            cursor: retrySubmitting ? 'not-allowed' : 'pointer',
+            opacity: retrySubmitting ? 0.6 : 1,
             fontSize: 11,
             alignSelf: 'flex-start',
           }}
           title="用相同参数重新提交任务"
         >
-          🔄 重试
+          {retrySubmitting ? '⏳ 提交中…' : '🔄 重试'}
         </button>
       )}
 

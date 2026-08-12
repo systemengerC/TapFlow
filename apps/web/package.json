@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --import ./lib/test-resolver.mjs --test lib/stores/*.test.ts lib/hooks/*.test.ts",
+    "test": "node --import ./lib/test-resolver.mjs --experimental-test-module-mocks --test lib/stores/*.test.ts lib/hooks/*.test.ts lib/jobs/*.test.ts lib/canvas/*.test.ts components/ui/*.test.tsx app/*.test.tsx",
     "typecheck": "tsc --noEmit",
     "lint": "eslint",
     "check": "npm run typecheck && npm run lint && npm run build"

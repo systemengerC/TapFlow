@@ -6,32 +6,67 @@
 
 import { useCanvasStore } from '@/lib/stores/canvasStore';
 import { useNodesStore } from '@/lib/stores/nodesStore';
+import { deleteSelectedNodes } from '@/lib/canvas/deleteNodes';
 import type { ClientOperation, Uuid } from '@tapflow/contracts';
 
+/** 节点几何/状态：View 层只依赖这些字段，不依赖完整 Node 类型 */
+export interface PanelNode {
+  nodeType: string;
+  position: { x: number; y: number };
+  size: { x: number; y: number };
+  locked?: boolean;
+}
+
+export interface PropertiesPanelViewProps {
+  selectedNodeIds: Uuid[];
+  /** 首个选中节点，缺失（脏选中）时不渲染 */
+  node: PanelNode | undefined;
+  onApply: (op: ClientOperation) => void;
+  onDelete: (ids: Uuid[]) => void;
+}
+
+/**
+ * store 连接层。
+ *
+ * 与 View 分离的原因：zustand v5 的 useStore 在服务端渲染时走 getServerSnapshot
+ * → getInitialState()，renderToStaticMarkup 永远只能看到初始空状态，无法对
+ * store 驱动的分支做渲染断言。把纯展示逻辑收进 View（props 驱动）后即可测试。
+ */
 // projectId 预留给后续操作鉴权使用，当前面板只读本地 store
 export default function PropertiesPanel() {
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds);
   const { nodes, applyLocal } = useNodesStore();
 
-  if (selectedNodeIds.length === 0) return null;
+  return (
+    <PropertiesPanelView
+      selectedNodeIds={selectedNodeIds as Uuid[]}
+      node={nodes[selectedNodeIds[0] as Uuid]}
+      onApply={applyLocal}
+      onDelete={deleteSelectedNodes}
+    />
+  );
+}
 
-  const firstId = selectedNodeIds[0] as Uuid;
-  const node = nodes[firstId];
+/** 纯展示层：不读 store，可用 renderToStaticMarkup 直接断言 */
+export function PropertiesPanelView({ selectedNodeIds, node, onApply, onDelete }: PropertiesPanelViewProps) {
+  if (selectedNodeIds.length === 0) return null;
   if (!node) return null;
 
+  // const 别名：参数绑定的收窄不会传递进下面的闭包（TS18048）
+  const n = node;
   const multiSelect = selectedNodeIds.length > 1;
 
   function handleMove(axis: 'x' | 'y', value: number) {
     const delta = {
-      x: axis === 'x' ? value - node.position.x : 0,
-      y: axis === 'y' ? value - node.position.y : 0,
+      x: axis === 'x' ? value - n.position.x : 0,
+      y: axis === 'y' ? value - n.position.y : 0,
     };
     const op: ClientOperation = {
       type: 'move_nodes',
       operationId: crypto.randomUUID() as Uuid,
       payload: { nodeIds: selectedNodeIds as Uuid[], delta },
     };
-    applyLocal(op);
+    onApply(op);
   }
 
   function handleSize(dim: 'x' | 'y', value: number) {
@@ -40,30 +75,23 @@ export default function PropertiesPanel() {
       operationId: crypto.randomUUID() as Uuid,
       payload: {
         nodeIds: selectedNodeIds as Uuid[],
-        size: dim === 'x' ? { x: value, y: node.size.y } : { x: node.size.x, y: value },
+        size: dim === 'x' ? { x: value, y: n.size.y } : { x: n.size.x, y: value },
       },
     };
-    applyLocal(op);
+    onApply(op);
   }
 
   function handleLockToggle() {
     const op: ClientOperation = {
       type: 'set_nodes_locked',
       operationId: crypto.randomUUID() as Uuid,
-      payload: { nodeIds: selectedNodeIds as Uuid[], locked: !node.locked },
+      payload: { nodeIds: selectedNodeIds as Uuid[], locked: !n.locked },
     };
-    applyLocal(op);
+    onApply(op);
   }
 
   function handleDelete() {
-    for (const id of selectedNodeIds) {
-      const op: ClientOperation = {
-        type: 'delete_node',
-        operationId: crypto.randomUUID() as Uuid,
-        payload: { nodeId: id as Uuid },
-      };
-      applyLocal(op);
-    }
+    onDelete(selectedNodeIds as Uuid[]);
   }
 
   return (
