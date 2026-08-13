@@ -3,7 +3,7 @@
  */
 'use client';
 
-import { useEffect, useCallback, useMemo, useRef, useState } from 'react';
+import { useEffect, useCallback, useMemo, useState } from 'react';
 import { useJobs } from '@/lib/hooks/useJobs';
 import CreateJobForm from '@/components/ui/CreateJobForm';
 import type { Job, Uuid, JobType, JobOutputRef } from '@tapflow/contracts';
@@ -18,7 +18,7 @@ interface JobsPanelProps {
 
 export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps) {
   const { jobs, loading, error, createJob, listJobs, getJob, cancelJob, startPolling, stopPolling } = useJobs(projectId);
-  const succeededJobGuard = useRef(createSucceededJobGuard()).current;
+  const [succeededJobGuard] = useState(createSucceededJobGuard);
   // 首次加载完成前不触发成功回调：已 succeeded 的历史任务节点已在画布快照中，
   // 重新回调会重复落节点（刷新页面即可复现）。
   const [hydrated, setHydrated] = useState(false);
