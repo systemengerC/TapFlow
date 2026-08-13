@@ -1,10 +1,10 @@
 /**
- * 资产预览组件：根据 assetId 获取签名 URL，渲染图片或视频。
- * 处理加载失败、URL 过期重新签名。
+ * 资产预览组件:根据 assetId 获取签名 URL，渲染图片或视频。
+ * 处理加载失败、URL 过期重新签名（有界重试，可取消）。
  */
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { Uuid } from '@tapflow/contracts';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? '';
@@ -27,6 +27,8 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
   const [asset, setAsset] = useState<Asset | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const retryCountRef = useRef(0);
+  const retryTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchAsset = async () => {
     setLoading(true);
@@ -38,6 +40,7 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
       }
       const data = await res.json();
       setAsset(data.asset);
+      retryCountRef.current = 0;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -45,8 +48,29 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
     }
   };
 
+  const handleMediaError = () => {
+    const MAX_RETRIES = 3;
+    if (retryCountRef.current >= MAX_RETRIES) {
+      setError('加载失败，已达最大重试次数');
+      return;
+    }
+    retryCountRef.current += 1;
+    const delay = Math.min(1000 * retryCountRef.current, 5000);
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null;
+      void fetchAsset();
+    }, delay);
+  };
+
   useEffect(() => {
+    retryCountRef.current = 0;
     void fetchAsset();
+    return () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
   }, [assetId]);
 
   if (loading) {
@@ -110,11 +134,7 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
           borderRadius: 6,
           display: 'block',
         }}
-        onError={() => {
-          // URL 过期或其他错误，重新获取
-          setError('图片加载失败');
-          setTimeout(() => void fetchAsset(), 1000);
-        }}
+        onError={handleMediaError}
       />
     );
   }
@@ -130,10 +150,7 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
           borderRadius: 6,
           display: 'block',
         }}
-        onError={() => {
-          setError('视频加载失败');
-          setTimeout(() => void fetchAsset(), 1000);
-        }}
+        onError={handleMediaError}
       />
     );
   }

@@ -53,10 +53,10 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
     if (!hydrated) return;
     jobs.forEach((job) => {
       if (job.status === 'succeeded' && !succeededJobsRef.current.has(job.id)) {
-        succeededJobsRef.current.add(job.id);
-        // 异步获取 outputs 后再回调
+        // 先调 getJob 拿 outputs，成功后才登记去重和回调
         void getJob(job.id).then((result) => {
           if (result) {
+            succeededJobsRef.current.add(job.id);
             onJobSucceeded(result.job, result.outputs);
           }
         });

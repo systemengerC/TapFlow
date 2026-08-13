@@ -67,6 +67,35 @@ export function useProject() {
 
       useNodesStore.getState().replaceSnapshot(nodes, edges, proj.canvasVersion);
       setProject(proj);
+
+      // 刷新恢复：对只有 jobId 没有 assetIds 的 generation_job 节点，调 getJob 回填 outputs
+      await Promise.all(
+        nodes
+          .filter(
+            (n) =>
+              n.nodeType === 'generation_job' &&
+              typeof (n.data as { jobId?: string })?.jobId === 'string' &&
+              (!(n.data as { assetIds?: string[] })?.assetIds || (n.data as { assetIds?: string[] }).assetIds.length === 0)
+          )
+          .map(async (node) => {
+            try {
+              const jobId = (node.data as { jobId: string }).jobId;
+              const res = await fetch(`${API_BASE}/api/jobs/${jobId}`);
+              if (!res.ok) return;
+              const data = await res.json();
+              const outputs = data.outputs as { assetId: string; ordinal: number }[] | undefined;
+              if (outputs && outputs.length > 0) {
+                // 更新节点 data，补上 assetIds
+                useNodesStore.getState().updateNodeData(node.id, {
+                  ...(node.data as object),
+                  assetIds: outputs.map((o) => o.assetId),
+                });
+              }
+            } catch {
+              // 忽略单个节点恢复失败
+            }
+          })
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
