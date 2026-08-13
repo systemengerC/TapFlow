@@ -351,6 +351,34 @@ export const CompleteUploadResponseSchema = z
   })
   .strict();
 
+/** 资产读取模型（GET /api/assets/:id 返回）：签名下载 URL 由服务端按需签发，不落库。
+ *  url 为前端可直接用于 <img>/<video> 的持久访问地址（私有桶签名 URL 带 token）。 */
+export const AssetSchema = z
+  .object({
+    id: UuidSchema,
+    projectId: UuidSchema,
+    assetType: AssetTypeSchema,
+    /** 由存储路径扩展名推导；未知扩展名按 assetType 给出默认值 */
+    mimeType: z.string().min(1),
+    sizeBytes: z.number().int().nonnegative().nullable(),
+    width: z.number().int().positive().nullable(),
+    height: z.number().int().positive().nullable(),
+    contentHash: z.string().regex(/^sha256:[0-9a-f]{64}$/).nullable(),
+    storagePath: z.string(),
+    /** 签名下载 URL（带 token，私有桶可直接访问） */
+    url: z.string().url(),
+    /** 签名 URL 过期时间；过期后需重新调用 GET /api/assets/:id 获取新 URL */
+    expiresAt: z.string().datetime(),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+
+export const GetAssetResponseSchema = z
+  .object({
+    asset: AssetSchema,
+  })
+  .strict();
+
 // ---------- Job 状态事件（03 文档） ----------
 export const JobStatusEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('job.queued'), jobId: UuidSchema }).strict(),

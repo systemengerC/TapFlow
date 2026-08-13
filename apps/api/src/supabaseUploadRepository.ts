@@ -8,6 +8,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
+  type Asset,
   type CompleteUploadResponse,
   type PresignUploadRequest,
   type PresignUploadResponse,
@@ -16,6 +17,7 @@ import {
 
 import { UnauthorizedError } from './app.ts';
 import {
+  AssetNotFoundError,
   UploadNotFoundError,
   UploadValidationError,
   type UploadRepository,
@@ -45,6 +47,26 @@ const MIME_EXTENSION: Record<string, string> = {
   'audio/wav': 'wav',
   'application/pdf': 'pdf',
 };
+
+/** asset_type → 默认 MIME（扩展名无法识别时兜底，保证 <img>/<video> 可渲染） */
+const ASSET_TYPE_DEFAULT_MIME: Record<string, string> = {
+  image: 'image/png',
+  thumbnail: 'image/jpeg',
+  video: 'video/mp4',
+  audio: 'audio/mpeg',
+  document: 'application/pdf',
+};
+
+/** 由存储路径扩展名推导 MIME；未知扩展名回退 asset_type 默认值 */
+function mimeFromStoragePath(storagePath: string, assetType: string): string {
+  const dot = storagePath.lastIndexOf('.');
+  if (dot !== -1) {
+    const ext = storagePath.slice(dot + 1).toLowerCase();
+    const byExt = Object.entries(MIME_EXTENSION).find(([, e]) => e === ext);
+    if (byExt) return byExt[0];
+  }
+  return ASSET_TYPE_DEFAULT_MIME[assetType] ?? 'application/octet-stream';
+}
 
 type UploadSessionRow = {
   project_id: string;
@@ -262,6 +284,93 @@ export class SupabaseUploadRepository implements UploadRepository {
       contentHash,
       alreadyCompleted: row.already_completed,
       contentDuplicateOfAssetId: null,
+    };
+  }
+
+  async getAsset(assetId: string, authorization?: string): Promise<Asset> {
+    if (!authorization) {
+      throw new UnauthorizedError('Authorization is required to read assets');
+    }
+
+    // 1) 读 assets 行（storage.objects RLS 同源策略；authenticated 只能看到自己项目的资产）
+    const readResponse = await this.fetcher(
+      `${this.baseUrl}/rest/v1/assets?id=eq.${encodeURIComponent(assetId)}` +
+        '&select=id,project_id,asset_type,storage_bucket,storage_path,content_hash,size_bytes,width,height,created_at',
+      { headers: this.headers(authorization) },
+    );
+    if (!readResponse.ok) {
+      throw new Error(`Failed to read asset: HTTP ${readResponse.status}`);
+    }
+    const rows = await readResponse.json() as Array<{
+      id: string;
+      project_id: string;
+      asset_type: string;
+      storage_bucket: string;
+      storage_path: string;
+      content_hash: string | null;
+      size_bytes: number | null;
+      width: number | null;
+      height: number | null;
+      created_at: string;
+    }>;
+    if (rows.length !== 1) {
+      throw new AssetNotFoundError(assetId);
+    }
+    const row = rows[0];
+
+    // 2) 签发下载签名 URL：
+    //    - 配置了 serviceKey：调 Storage createSignedUrl，返回带 token 的私有桶直读 URL
+    //      （前端 <img>/<video> 无需附加请求头）
+    //    - 未配置（联调）：返回对象 URL，客户端需带 apikey + Authorization 下载
+    const expiresIn = 3600; // 1h
+    const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+    let url: string;
+    if (this.serviceKey) {
+      const signResponse = await this.fetcher(
+        `${this.baseUrl}/storage/v1/object/sign/${row.storage_bucket}/${row.storage_path}`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.serviceKey}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ expiresIn }),
+        },
+      );
+      if (!signResponse.ok) {
+        const error = await signResponse.json().catch(() => ({})) as SupabaseError;
+        throw new Error(error.message ?? `Failed to create signed download URL: HTTP ${signResponse.status}`);
+      }
+      const signResult = await signResponse.json() as {
+        signedURL?: string;
+        signedUrl?: string;
+        url?: string;
+        token?: string;
+      };
+      const signedUrl = signResult.signedURL ?? signResult.signedUrl ?? signResult.url;
+      if (!signedUrl) {
+        throw new Error('createSignedUrl returned no signed URL');
+      }
+      url = /^https?:\/\//i.test(signedUrl)
+        ? signedUrl
+        : `${this.baseUrl}/storage/v1/${signedUrl.replace(/^\/+/, '')}`;
+    } else {
+      url = `${this.baseUrl}/storage/v1/object/${row.storage_bucket}/${row.storage_path}`;
+    }
+
+    return {
+      id: row.id as Uuid,
+      projectId: row.project_id as Uuid,
+      assetType: row.asset_type as Asset['assetType'],
+      mimeType: mimeFromStoragePath(row.storage_path, row.asset_type),
+      sizeBytes: row.size_bytes,
+      width: row.width,
+      height: row.height,
+      contentHash: row.content_hash,
+      storagePath: row.storage_path,
+      url,
+      expiresAt,
+      createdAt: row.created_at,
     };
   }
 

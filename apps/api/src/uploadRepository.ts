@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  type Asset,
   type CompleteUploadResponse,
   type PresignUploadRequest,
   type PresignUploadResponse,
@@ -22,6 +23,8 @@ export type UploadRepositoryOptions = {
 export interface UploadRepository {
   presign(request: PresignUploadRequest, authorization?: string): Promise<PresignUploadResponse>;
   complete(uploadId: string, authorization?: string): Promise<CompleteUploadResponse>;
+  /** 读取资产并签发下载签名 URL（GET /api/assets/:id） */
+  getAsset(assetId: string, authorization?: string): Promise<Asset>;
 }
 
 const MIME_EXTENSION: Record<string, string> = {
@@ -54,6 +57,16 @@ export class UploadNotFoundError extends Error {
     super(`Upload session ${uploadId} was not found`);
     this.name = 'UploadNotFoundError';
     this.uploadId = uploadId;
+  }
+}
+
+export class AssetNotFoundError extends Error {
+  readonly assetId: string;
+
+  constructor(assetId: string) {
+    super(`Asset ${assetId} was not found`);
+    this.name = 'AssetNotFoundError';
+    this.assetId = assetId;
   }
 }
 
@@ -116,6 +129,34 @@ export class InMemoryUploadRepository implements UploadRepository {
       contentHash: `sha256:${'0'.repeat(64)}`,
       alreadyCompleted,
       contentDuplicateOfAssetId: null,
+    };
+  }
+
+  async getAsset(assetId: string): Promise<Asset> {
+    let found: { uploadId: string; request: PresignUploadRequest } | undefined;
+    for (const [uploadId, session] of this.sessions) {
+      if (session.assetId === assetId) {
+        found = { uploadId, request: session.request };
+        break;
+      }
+    }
+    if (!found) {
+      throw new AssetNotFoundError(assetId);
+    }
+    const storagePath = `${found.uploadId}/upload.${MIME_EXTENSION[found.request.mimeType]}`;
+    return {
+      id: assetId as Uuid,
+      projectId: found.request.projectId,
+      assetType: found.request.assetType,
+      mimeType: found.request.mimeType,
+      sizeBytes: found.request.sizeBytes,
+      width: found.request.width ?? null,
+      height: found.request.height ?? null,
+      contentHash: `sha256:${'0'.repeat(64)}`,
+      storagePath,
+      url: `${this.fakeStorageBaseUrl}/assets/${assetId}?token=fake-download-${assetId}`,
+      expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+      createdAt: new Date().toISOString(),
     };
   }
 }

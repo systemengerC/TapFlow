@@ -11,7 +11,11 @@ import { test } from 'node:test';
 
 import { SupabaseUploadRepository } from './supabaseUploadRepository.ts';
 import { UnauthorizedError } from './app.ts';
-import { UploadNotFoundError, UploadValidationError } from './uploadRepository.ts';
+import {
+  AssetNotFoundError,
+  UploadNotFoundError,
+  UploadValidationError,
+} from './uploadRepository.ts';
 
 const SUPABASE_URL = 'https://example.supabase.co';
 const ANON_KEY = 'anon-key';
@@ -230,5 +234,91 @@ test('complete maps unreadable object to UPLOAD_INCOMPLETE', async () => {
   await assert.rejects(
     () => repo.complete(UPLOAD_ID, 'Bearer test-jwt'),
     (err: unknown) => err instanceof UploadValidationError && err.code === 'UPLOAD_INCOMPLETE',
+  );
+});
+
+const ASSET_ROW = {
+  id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+  project_id: PROJECT_ID,
+  asset_type: 'image',
+  storage_bucket: 'generated',
+  storage_path: 'ffffffff-ffff-4fff-8fff-ffffffffffff/0.png',
+  content_hash: 'sha256:039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81',
+  size_bytes: 3,
+  width: 800,
+  height: 600,
+  created_at: '2026-08-13T00:00:00.000Z',
+};
+
+test('getAsset reads the assets row and signs a download URL with serviceKey', async () => {
+  let signRequest: RequestInit | undefined;
+  const repo = new SupabaseUploadRepository({
+    supabaseUrl: SUPABASE_URL,
+    anonKey: ANON_KEY,
+    serviceKey: 'service-role-key',
+    fetcher: mockFetch({
+      'rest/v1/assets': () => jsonResponse([ASSET_ROW]),
+      'storage/v1/object/sign/generated': (init) => {
+        signRequest = init;
+        return jsonResponse({ signedURL: `/object/sign/generated/${ASSET_ROW.storage_path}?token=dl-token` });
+      },
+    }) as typeof fetch,
+  });
+
+  const result = await repo.getAsset(ASSET_ROW.id, 'Bearer test-jwt');
+
+  assert.equal(result.id, ASSET_ROW.id);
+  assert.equal(result.projectId, PROJECT_ID);
+  assert.equal(result.assetType, 'image');
+  assert.equal(result.mimeType, 'image/png'); // 由 storage_path 扩展名推导
+  assert.equal(result.width, 800);
+  assert.equal(result.height, 600);
+  assert.equal(result.contentHash, ASSET_ROW.content_hash);
+  // 签名 URL 用 service key 签发并归一化（相对路径补 baseUrl）
+  assert.equal(result.url, `${SUPABASE_URL}/storage/v1/object/sign/generated/${ASSET_ROW.storage_path}?token=dl-token`);
+  assert.ok(Date.parse(result.expiresAt) > Date.now());
+  const headers = new Headers(signRequest?.headers);
+  assert.equal(headers.get('authorization'), 'Bearer service-role-key');
+  assert.equal(JSON.parse(String(signRequest?.body)).expiresIn, 3600);
+});
+
+test('getAsset falls back to the object URL when no serviceKey is configured', async () => {
+  const repo = makeRepo({
+    'rest/v1/assets': () => jsonResponse([ASSET_ROW]),
+  });
+
+  const result = await repo.getAsset(ASSET_ROW.id, 'Bearer test-jwt');
+
+  assert.equal(result.url, `${SUPABASE_URL}/storage/v1/object/generated/${ASSET_ROW.storage_path}`);
+  assert.equal(result.mimeType, 'image/png');
+});
+
+test('getAsset derives default MIME from asset_type when extension is unknown', async () => {
+  const repo = makeRepo({
+    'rest/v1/assets': () =>
+      jsonResponse([{ ...ASSET_ROW, asset_type: 'video', storage_path: 'ffffffff-ffff-4fff-8fff-ffffffffffff/0' }]),
+  });
+
+  const result = await repo.getAsset(ASSET_ROW.id, 'Bearer test-jwt');
+
+  assert.equal(result.assetType, 'video');
+  assert.equal(result.mimeType, 'video/mp4');
+});
+
+test('getAsset maps an empty assets row to ASSET_NOT_FOUND', async () => {
+  const repo = makeRepo({
+    'rest/v1/assets': () => jsonResponse([]),
+  });
+  await assert.rejects(
+    () => repo.getAsset(ASSET_ROW.id, 'Bearer test-jwt'),
+    (err: unknown) => err instanceof AssetNotFoundError,
+  );
+});
+
+test('getAsset requires authorization', async () => {
+  const repo = makeRepo({});
+  await assert.rejects(
+    () => repo.getAsset(ASSET_ROW.id),
+    (err: unknown) => err instanceof UnauthorizedError,
   );
 });

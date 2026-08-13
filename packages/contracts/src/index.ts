@@ -30,6 +30,8 @@ export type PresignUploadRequest = z.infer<typeof S.PresignUploadRequestSchema>;
 export type PresignUploadResponse = z.infer<typeof S.PresignUploadResponseSchema>;
 export type CompleteUploadRequest = z.infer<typeof S.CompleteUploadRequestSchema>;
 export type CompleteUploadResponse = z.infer<typeof S.CompleteUploadResponseSchema>;
+export type Asset = z.infer<typeof S.AssetSchema>;
+export type GetAssetResponse = z.infer<typeof S.GetAssetResponseSchema>;
 
 // 项目相关
 export type Project = z.infer<typeof S.ProjectSchema>;

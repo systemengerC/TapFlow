@@ -5,6 +5,7 @@ import { type Server } from 'node:http';
 
 import {
   CompleteUploadResponseSchema,
+  GetAssetResponseSchema,
   PresignUploadResponseSchema,
 } from '@tapflow/contracts';
 
@@ -137,5 +138,59 @@ test('complete: invalid uploadId returns 400', async () => {
   await withServer(appOptions(), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/assets/not-a-uuid/complete`, { method: 'POST' });
     assert.equal(response.status, 400);
+  });
+});
+
+test('GET /api/assets/:id: returns signed download URL for a completed upload', async () => {
+  const uploads = new InMemoryUploadRepository();
+  await withServer({ ...appOptions(), uploadRepository: uploads }, async (baseUrl) => {
+    // presign → complete → get 闭环
+    const presignResponse = await fetch(`${baseUrl}/api/assets/presign-upload`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        assetType: 'video',
+        mimeType: 'video/mp4',
+        sizeBytes: 5242880,
+        width: 1280,
+        height: 720,
+        projectId: '4f9c1a2e-8b3d-4e5f-9a6b-2c3d4e5f6a7b',
+      }),
+    });
+    const { uploadId } = await presignResponse.json();
+    const completeResponse = await fetch(`${baseUrl}/api/assets/${uploadId}/complete`, { method: 'POST' });
+    const { assetId } = await completeResponse.json();
+
+    const response = await fetch(`${baseUrl}/api/assets/${assetId}`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    const parsed = GetAssetResponseSchema.safeParse(body);
+    assert.equal(parsed.success, true, JSON.stringify(parsed.error?.issues ?? body));
+    assert.equal(parsed.data!.asset.id, assetId);
+    assert.equal(parsed.data!.asset.assetType, 'video');
+    assert.equal(parsed.data!.asset.mimeType, 'video/mp4');
+    assert.equal(parsed.data!.asset.width, 1280);
+    assert.equal(parsed.data!.asset.height, 720);
+    assert.equal(parsed.data!.asset.sizeBytes, 5242880);
+    assert.match(parsed.data!.asset.url, /^https:\/\/storage\.example\.invalid\/assets\//);
+    assert.ok(Date.parse(parsed.data!.asset.expiresAt) > Date.now());
+  });
+});
+
+test('GET /api/assets/:id: unknown assetId returns 404 ASSET_NOT_FOUND', async () => {
+  await withServer(appOptions(), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/assets/00000000-0000-0000-0000-000000000000`);
+    assert.equal(response.status, 404);
+    const body = await response.json();
+    assert.equal(body.error.code, 'ASSET_NOT_FOUND');
+  });
+});
+
+test('GET /api/assets/:id: invalid assetId returns 400', async () => {
+  await withServer(appOptions(), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/assets/not-a-uuid`);
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.error.code, 'INVALID_ASSET_ID');
   });
 });

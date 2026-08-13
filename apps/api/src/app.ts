@@ -8,6 +8,7 @@ import {
   CreateJobResponseSchema,
   CreateProjectRequestSchema,
   ErrorResponseSchema,
+  GetAssetResponseSchema,
   GetJobResponseSchema,
   ListJobsResponseSchema,
   ListProjectsResponseSchema,
@@ -23,6 +24,7 @@ import {
 import { InMemoryProjectRepository, ProjectNotFoundError, type ProjectRepository } from './projectRepository.ts';
 import { JobNotFoundError, JobStateTransitionError, JobValidationError, type JobRepository } from './jobRepository.ts';
 import {
+  AssetNotFoundError,
   UploadNotFoundError,
   UploadValidationError,
   type UploadRepository,
@@ -34,6 +36,7 @@ const PROJECT_ROUTE = /^\/api\/projects$/;
 const PROJECT_SNAPSHOT_ROUTE = /^\/api\/projects\/([^/]+)$/;
 const PRESIGN_UPLOAD_ROUTE = /^\/api\/assets\/presign-upload$/;
 const COMPLETE_UPLOAD_ROUTE = /^\/api\/assets\/([^/]+)\/complete$/;
+const ASSET_DETAIL_ROUTE = /^\/api\/assets\/([^/]+)$/;
 const JOBS_ROUTE = /^\/api\/jobs$/;
 const JOB_DETAIL_ROUTE = /^\/api\/jobs\/([^/]+)$/;
 const JOB_CANCEL_ROUTE = /^\/api\/jobs\/([^/]+)\/cancel$/;
@@ -381,6 +384,10 @@ function handleRepositoryError(response: ServerResponse, error: unknown): void {
     sendError(response, 404, 'UPLOAD_NOT_FOUND', error.message);
     return;
   }
+  if (error instanceof AssetNotFoundError) {
+    sendError(response, 404, 'ASSET_NOT_FOUND', error.message);
+    return;
+  }
   if (error instanceof UploadValidationError) {
     const status = error.code === 'UNSUPPORTED_MEDIA_TYPE' ? 415
       : error.code === 'UPLOAD_EXPIRED' ? 422
@@ -607,6 +614,22 @@ export function createApp({ repository, projectRepository, uploadRepository, job
       try {
         const result = await uploadRepository.complete(uploadId, request.headers.authorization);
         sendJson(response, 200, result);
+      } catch (error) {
+        handleRepositoryError(response, error);
+      }
+      return;
+    }
+
+    const assetDetailMatch = ASSET_DETAIL_ROUTE.exec(url.pathname);
+    if (assetDetailMatch && request.method === 'GET') {
+      const assetId = decodeURIComponent(assetDetailMatch[1]);
+      if (!UuidSchema.safeParse(assetId).success) {
+        sendError(response, 400, 'INVALID_ASSET_ID', 'assetId must be a UUID');
+        return;
+      }
+      try {
+        const asset = await uploadRepository.getAsset(assetId, request.headers.authorization);
+        sendJson(response, 200, GetAssetResponseSchema.parse({ asset }));
       } catch (error) {
         handleRepositoryError(response, error);
       }
