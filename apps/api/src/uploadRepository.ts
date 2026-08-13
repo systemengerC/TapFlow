@@ -25,6 +25,8 @@ export interface UploadRepository {
   complete(uploadId: string, authorization?: string): Promise<CompleteUploadResponse>;
   /** 读取资产并签发下载签名 URL（GET /api/assets/:id） */
   getAsset(assetId: string, authorization?: string): Promise<Asset>;
+  /** 批量读取资产（GET /api/jobs/:id 输出列表）；按入参顺序返回，任一缺失抛 AssetNotFoundError */
+  getAssets(assetIds: string[], authorization?: string): Promise<Asset[]>;
 }
 
 const MIME_EXTENSION: Record<string, string> = {
@@ -158,5 +160,9 @@ export class InMemoryUploadRepository implements UploadRepository {
       expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
       createdAt: new Date().toISOString(),
     };
+  }
+
+  async getAssets(assetIds: string[]): Promise<Asset[]> {
+    return Promise.all(assetIds.map((assetId) => this.getAsset(assetId)));
   }
 }

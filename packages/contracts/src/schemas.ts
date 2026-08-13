@@ -447,6 +447,8 @@ export const ListJobsResponseSchema = z
 export const GetJobResponseSchema = z
   .object({
     job: JobSchema,
+    /** Job 输出资产（签名下载 URL 由服务端按需签发）；无输出时为空数组 */
+    outputs: z.array(AssetSchema).default([]),
   })
   .strict();
 

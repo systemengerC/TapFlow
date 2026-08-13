@@ -10,12 +10,12 @@ import { SupabaseJobRepository } from './supabaseJobRepository.ts';
 const SUPABASE_URL = 'https://example.supabase.co';
 const ANON_KEY = 'anon-key';
 
-function mockFetch(routes: Record<string, (init: RequestInit) => Response>) {
+function mockFetch(routes: Record<string, (init: RequestInit, input?: string) => Response>) {
   return async (input: any, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     for (const [pattern, handler] of Object.entries(routes)) {
       if (url.includes(pattern)) {
-        return handler(init ?? {});
+        return handler(init ?? {}, url);
       }
     }
     throw new Error(`Unexpected fetch: ${url}`);
@@ -190,4 +190,30 @@ test('listByProject queries generation_jobs filtered by project', async () => {
   assert.equal(result.jobs.length, 1);
   assert.equal(result.jobs[0].id, JOB_ROW.id);
   assert.ok(calledPath.includes('rest/v1/generation_jobs'));
+});
+
+test('getOutputs queries generation_job_outputs ordered by ordinal', async () => {
+  let calledPath = '';
+  const repo = new SupabaseJobRepository({
+    supabaseUrl: SUPABASE_URL,
+    anonKey: ANON_KEY,
+    fetcher: mockFetch({
+      'rest/v1/generation_job_outputs': (init, input) => {
+        calledPath = input ?? '';
+        return jsonResponse([
+          { asset_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', ordinal: 1 },
+          { asset_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', ordinal: 0 },
+        ]);
+      },
+    }) as typeof fetch,
+  });
+
+  const result = await repo.getOutputs(JOB_ROW.id, 'Bearer test-jwt');
+
+  assert.ok(calledPath.includes(`job_id=eq.${JOB_ROW.id}`));
+  assert.ok(calledPath.includes('order=ordinal.asc'));
+  assert.deepEqual(result, [
+    { assetId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', ordinal: 1 },
+    { assetId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', ordinal: 0 },
+  ]);
 });

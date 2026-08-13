@@ -292,16 +292,62 @@ export class SupabaseUploadRepository implements UploadRepository {
       throw new UnauthorizedError('Authorization is required to read assets');
     }
 
-    // 1) 读 assets 行（storage.objects RLS 同源策略；authenticated 只能看到自己项目的资产）
+    const rows = await this.fetchAssetRows(`eq.${assetId}`, authorization);
+    if (rows.length !== 1) {
+      throw new AssetNotFoundError(assetId);
+    }
+    return this.toAsset(rows[0], authorization);
+  }
+
+  async getAssets(assetIds: string[], authorization?: string): Promise<Asset[]> {
+    if (assetIds.length === 0) {
+      return [];
+    }
+    if (!authorization) {
+      throw new UnauthorizedError('Authorization is required to read assets');
+    }
+
+    // PostgREST in 过滤器：id=in.(uuid1,uuid2,...)；按入参顺序对齐返回（签名逐个签发）
+    const idList = assetIds.map((id) => encodeURIComponent(id)).join(',');
+    const rows = await this.fetchAssetRows(`in.(${idList})`, authorization);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    return Promise.all(assetIds.map((assetId) => {
+      const row = byId.get(assetId);
+      if (!row) {
+        throw new AssetNotFoundError(assetId);
+      }
+      return this.toAsset(row, authorization);
+    }));
+  }
+
+  private async fetchAssetRows(
+    idFilter: string,
+    authorization: string,
+  ): Promise<Array<{
+    id: string;
+    project_id: string;
+    asset_type: string;
+    storage_bucket: string;
+    storage_path: string;
+    content_hash: string | null;
+    size_bytes: number | null;
+    width: number | null;
+    height: number | null;
+    created_at: string;
+  }>> {
     const readResponse = await this.fetcher(
-      `${this.baseUrl}/rest/v1/assets?id=eq.${encodeURIComponent(assetId)}` +
+      `${this.baseUrl}/rest/v1/assets?id=${idFilter}` +
         '&select=id,project_id,asset_type,storage_bucket,storage_path,content_hash,size_bytes,width,height,created_at',
       { headers: this.headers(authorization) },
     );
     if (!readResponse.ok) {
       throw new Error(`Failed to read asset: HTTP ${readResponse.status}`);
     }
-    const rows = await readResponse.json() as Array<{
+    return readResponse.json();
+  }
+
+  private async toAsset(
+    row: {
       id: string;
       project_id: string;
       asset_type: string;
@@ -312,13 +358,10 @@ export class SupabaseUploadRepository implements UploadRepository {
       width: number | null;
       height: number | null;
       created_at: string;
-    }>;
-    if (rows.length !== 1) {
-      throw new AssetNotFoundError(assetId);
-    }
-    const row = rows[0];
-
-    // 2) 签发下载签名 URL：
+    },
+    authorization: string,
+  ): Promise<Asset> {
+    // 签发下载签名 URL：
     //    - 配置了 serviceKey：调 Storage createSignedUrl，返回带 token 的私有桶直读 URL
     //      （前端 <img>/<video> 无需附加请求头）
     //    - 未配置（联调）：返回对象 URL，客户端需带 apikey + Authorization 下载

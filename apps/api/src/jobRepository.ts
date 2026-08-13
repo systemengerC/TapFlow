@@ -19,8 +19,15 @@ export interface JobRepository {
   create(request: CreateJobRequest, authorization?: string): Promise<CreateJobResponse>;
   listByProject(projectId: string, authorization?: string): Promise<ListJobsResponse>;
   get(jobId: string, authorization?: string): Promise<Job>;
+  /** Job 输出资产链接行（generation_job_outputs，按 ordinal 升序）；无输出返回 [] */
+  getOutputs(jobId: string, authorization?: string): Promise<JobOutput[]>;
   cancel(jobId: string, authorization?: string): Promise<CancelJobResponse>;
 }
+
+export type JobOutput = {
+  assetId: Uuid;
+  ordinal: number;
+};
 
 export class JobNotFoundError extends Error {
   readonly jobId: string;
@@ -119,6 +126,12 @@ export class InMemoryJobRepository implements JobRepository {
       throw new JobNotFoundError(jobId);
     }
     return row.job;
+  }
+
+  async getOutputs(): Promise<JobOutput[]> {
+    // 内存模式无持久化输出：Worker 侧 FakeProvider 产物不写回 InMemoryUploadRepository，
+    // 媒体预览依赖 Supabase 模式（generation_job_outputs 表）。
+    return [];
   }
 
   async cancel(jobId: string): Promise<CancelJobResponse> {

@@ -7,20 +7,24 @@ import { after, before, test } from 'node:test';
 import type { AddressInfo } from 'node:net';
 
 import { createApp, InMemoryOperationsRepository } from './app.ts';
-import { InMemoryJobRepository } from './jobRepository.ts';
+import { type JobOutput, InMemoryJobRepository, JobNotFoundError, type JobRepository } from './jobRepository.ts';
 import { InMemoryProjectRepository } from './projectRepository.ts';
-import { InMemoryUploadRepository } from './uploadRepository.ts';
+import { InMemoryUploadRepository, type UploadRepository } from './uploadRepository.ts';
+import type { Job, Uuid } from '@tapflow/contracts';
 
 // ---------- helpers ----------
 type TestServer = { server: ReturnType<typeof createApp>; baseUrl: string };
 
-async function withServer(fn: (ctx: TestServer) => Promise<void>): Promise<void> {
-  const jobs = new InMemoryJobRepository();
+async function withServer(
+  fn: (ctx: TestServer) => Promise<void>,
+  options: { jobRepository?: JobRepository; uploadRepository?: UploadRepository } = {},
+): Promise<void> {
+  const jobs = options.jobRepository ?? new InMemoryJobRepository();
   const projects = new InMemoryProjectRepository();
   const server = createApp({
     repository: new InMemoryOperationsRepository(),
     projectRepository: projects,
-    uploadRepository: new InMemoryUploadRepository(),
+    uploadRepository: options.uploadRepository ?? new InMemoryUploadRepository(),
     jobRepository: jobs,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -150,7 +154,85 @@ test('GET /api/jobs/:jobId returns a job', async () => {
     assert.equal(status, 200);
     assert.equal(body.job.id, jobId);
     assert.equal(body.job.status, 'queued');
+    assert.deepEqual(body.outputs, [], 'in-memory jobs have no persisted outputs');
   });
+});
+
+test('GET /api/jobs/:jobId returns succeeded outputs with signed URLs', async () => {
+  const JOB_ID = '44444444-4444-4444-8444-444444444444';
+  const outputAssetIds: Uuid[] = [];
+  // 桩 JobRepository：固定 jobId，getOutputs 返回注册的资产 id（ordinal 递增）
+  const stubJobs: JobRepository = {
+    async create() {
+      throw new Error('not used');
+    },
+    async listByProject() {
+      return { jobs: [] };
+    },
+    async get(jobId: string) {
+      if (jobId !== JOB_ID) throw new JobNotFoundError(jobId);
+      const now = new Date().toISOString();
+      return {
+        id: JOB_ID as Uuid,
+        projectId: PROJECT_ID as Uuid,
+        parentJobId: null,
+        attempt: 1,
+        jobType: 'text_to_image',
+        provider: null,
+        model: 'gpt-image-2',
+        params: { prompt: 'a red apple' },
+        inputNodeIds: [UUID as Uuid],
+        status: 'succeeded',
+        providerJobId: null,
+        errorCode: null,
+        errorMessage: null,
+        idempotencyKey: IDEM_KEY as Uuid,
+        cancelRequestedAt: null,
+        finishedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      } satisfies Job;
+    },
+    async getOutputs(): Promise<JobOutput[]> {
+      return outputAssetIds.map((assetId, ordinal) => ({ assetId, ordinal }));
+    },
+    async cancel() {
+      throw new Error('not used');
+    },
+  };
+  const uploads = new InMemoryUploadRepository();
+
+  await withServer(async ({ baseUrl }) => {
+    // 1) 注册一个真实资产：presign → complete（InMemory 模式无需真实 PUT）
+    const presign = await jsonFetch(`${baseUrl}/api/assets/presign-upload`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: PROJECT_ID,
+        assetType: 'image',
+        mimeType: 'image/png',
+        sizeBytes: 1024,
+        width: 800,
+        height: 600,
+      }),
+    });
+    assert.equal(presign.status, 200);
+    const complete = await jsonFetch(`${baseUrl}/api/assets/${presign.body.uploadId}/complete`, { method: 'POST' });
+    assert.equal(complete.status, 200);
+    outputAssetIds.push(complete.body.assetId);
+
+    // 2) GET /api/jobs/:id 应返回 outputs（含签名 URL）
+    const { status, body } = await jsonFetch(`${baseUrl}/api/jobs/${JOB_ID}`);
+    assert.equal(status, 200);
+    assert.equal(body.job.id, JOB_ID);
+    assert.equal(body.job.status, 'succeeded');
+    assert.equal(body.outputs.length, 1);
+    assert.equal(body.outputs[0].id, complete.body.assetId);
+    assert.equal(body.outputs[0].assetType, 'image');
+    assert.equal(body.outputs[0].mimeType, 'image/png');
+    assert.ok(body.outputs[0].url.includes('fake-download'), `output url should be a signed URL: ${body.outputs[0].url}`);
+    assert.ok(Date.parse(body.outputs[0].expiresAt) > Date.now());
+  }, { jobRepository: stubJobs, uploadRepository: uploads });
 });
 
 test('GET /api/jobs/:jobId unknown returns 404', async () => {

@@ -40,6 +40,10 @@ export class EmbeddedWorkerJobRepository implements JobRepository {
     return this.inner.get(jobId, authorization);
   }
 
+  getOutputs(jobId: string, authorization?: string): Promise<import('./jobRepository.ts').JobOutput[]> {
+    return this.inner.getOutputs(jobId, authorization);
+  }
+
   cancel(jobId: string, authorization?: string): Promise<CancelJobResponse> {
     // cancel 修改的是 InMemoryJobRepository 内的 job 对象；seed 共享同一引用，
     // workerStore 自动可见 cancel_requested 状态，Runner 的取消确认流程可继续。

@@ -22,12 +22,12 @@ const ANON_KEY = 'anon-key';
 const PROJECT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const UPLOAD_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
-function mockFetch(routes: Record<string, (init: RequestInit) => Response>) {
+function mockFetch(routes: Record<string, (init: RequestInit, input?: string) => Response>) {
   return async (input: any, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     for (const [pattern, handler] of Object.entries(routes)) {
       if (url.includes(pattern)) {
-        return handler(init ?? {});
+        return handler(init ?? {}, url);
       }
     }
     throw new Error(`Unexpected fetch: ${url}`);
@@ -320,5 +320,53 @@ test('getAsset requires authorization', async () => {
   await assert.rejects(
     () => repo.getAsset(ASSET_ROW.id),
     (err: unknown) => err instanceof UnauthorizedError,
+  );
+});
+
+test('getAssets queries by id=in.(...) and signs each asset in input order', async () => {
+  let assetsPath = '';
+  const signPaths: string[] = [];
+  const secondRow = { ...ASSET_ROW, id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', storage_path: 'ffffffff-ffff-4fff-8fff-ffffffffffff/1.webp' };
+  const repo = new SupabaseUploadRepository({
+    supabaseUrl: SUPABASE_URL,
+    anonKey: ANON_KEY,
+    serviceKey: 'service-role-key',
+    fetcher: mockFetch({
+      'rest/v1/assets': (_init, input) => {
+        assetsPath = input ?? '';
+        return jsonResponse([secondRow, ASSET_ROW]); // 故意乱序，验证按入参顺序对齐
+      },
+      'storage/v1/object/sign/generated': (_init, input) => {
+        const path = (input ?? '').split('/object/sign/generated/')[1]?.split('?')[0] ?? '';
+        signPaths.push(path);
+        return jsonResponse({ signedURL: `/object/sign/generated/${path}?token=dl-${signPaths.length}` });
+      },
+    }) as typeof fetch,
+  });
+
+  const result = await repo.getAssets([ASSET_ROW.id, secondRow.id], 'Bearer test-jwt');
+
+  assert.ok(assetsPath.includes(`id=in.(${ASSET_ROW.id},${secondRow.id})`), `assets query must use in filter, got: ${assetsPath}`);
+  assert.deepEqual(result.map((a) => a.id), [ASSET_ROW.id, secondRow.id], 'must preserve input order');
+  assert.equal(result[0].mimeType, 'image/png');
+  assert.equal(result[1].mimeType, 'image/webp');
+  // 两次签名（每个资产一次），路径与资产 storage_path 对应
+  assert.deepEqual(signPaths, [ASSET_ROW.storage_path, secondRow.storage_path]);
+  assert.ok(result[0].url.includes('token=dl-1'));
+  assert.ok(result[1].url.includes('token=dl-2'));
+});
+
+test('getAssets returns [] for empty input', async () => {
+  const repo = makeRepo({});
+  assert.deepEqual(await repo.getAssets([]), []);
+});
+
+test('getAssets maps a missing asset to ASSET_NOT_FOUND', async () => {
+  const repo = makeRepo({
+    'rest/v1/assets': () => jsonResponse([ASSET_ROW]), // 只返回其中一个
+  });
+  await assert.rejects(
+    () => repo.getAssets([ASSET_ROW.id, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'], 'Bearer test-jwt'),
+    (err: unknown) => err instanceof AssetNotFoundError,
   );
 });

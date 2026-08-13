@@ -20,6 +20,7 @@ import {
   JobNotFoundError,
   JobStateTransitionError,
   JobValidationError,
+  type JobOutput,
   type JobRepository,
 } from './jobRepository.ts';
 
@@ -101,6 +102,17 @@ export class SupabaseJobRepository implements JobRepository {
       throw new JobNotFoundError(jobId);
     }
     return this.toJob(rows[0]);
+  }
+
+  async getOutputs(jobId: string, authorization?: string): Promise<JobOutput[]> {
+    const rows = await this.fetchGet<Array<{ asset_id: string; ordinal: number }>>(
+      `/rest/v1/generation_job_outputs?job_id=eq.${encodeURIComponent(jobId)}&select=asset_id,ordinal&order=ordinal.asc`,
+      authorization,
+    );
+    return rows.map((row) => ({
+      assetId: row.asset_id as Uuid,
+      ordinal: row.ordinal,
+    }));
   }
 
   async cancel(jobId: string, authorization?: string): Promise<CancelJobResponse> {
