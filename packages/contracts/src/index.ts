@@ -51,5 +51,6 @@ export type CreateJobRequest = z.input<typeof S.CreateJobRequestSchema>;
 export type CreateJobResponse = z.infer<typeof S.CreateJobResponseSchema>;
 export type ListJobsResponse = z.infer<typeof S.ListJobsResponseSchema>;
 export type GetJobResponse = z.infer<typeof S.GetJobResponseSchema>;
+export type JobOutputRef = z.infer<typeof S.JobOutputRefSchema>;
 export type CancelJobResponse = z.infer<typeof S.CancelJobResponseSchema>;
 export type ErrorResponse = z.infer<typeof S.ErrorResponseSchema>;

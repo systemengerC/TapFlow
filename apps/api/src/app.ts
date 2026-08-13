@@ -514,11 +514,7 @@ export function createApp({ repository, projectRepository, uploadRepository, job
       }
       try {
         const job = await jobRepository.get(jobId, request.headers.authorization);
-        const outputsMeta = await jobRepository.getOutputs(jobId, request.headers.authorization);
-        const outputs = await uploadRepository.getAssets(
-          outputsMeta.map((output) => output.assetId),
-          request.headers.authorization,
-        );
+        const outputs = await jobRepository.getOutputs(jobId, request.headers.authorization);
         sendJson(response, 200, GetJobResponseSchema.parse({ job, outputs }));
       } catch (error) {
         handleRepositoryError(response, error);

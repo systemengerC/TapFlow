@@ -444,11 +444,20 @@ export const ListJobsResponseSchema = z
   })
   .strict();
 
+/** Job 输出引用（generation_job_outputs 行，按 ordinal 升序）。
+ *  仅返回引用，不内嵌短期签名 URL；前端需按 assetId 调用 GET /api/assets/:id 获取下载地址。 */
+export const JobOutputRefSchema = z
+  .object({
+    assetId: UuidSchema,
+    ordinal: z.number().int().nonnegative(),
+  })
+  .strict();
+
 export const GetJobResponseSchema = z
   .object({
     job: JobSchema,
-    /** Job 输出资产（签名下载 URL 由服务端按需签发）；无输出时为空数组 */
-    outputs: z.array(AssetSchema).default([]),
+    /** Job 输出资产引用（按 ordinal 升序）；无输出时为空数组 */
+    outputs: z.array(JobOutputRefSchema).default([]),
   })
   .strict();
 

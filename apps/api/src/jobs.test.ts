@@ -158,7 +158,7 @@ test('GET /api/jobs/:jobId returns a job', async () => {
   });
 });
 
-test('GET /api/jobs/:jobId returns succeeded outputs with signed URLs', async () => {
+test('GET /api/jobs/:jobId returns ordered output references (no signed URLs embedded)', async () => {
   const JOB_ID = '44444444-4444-4444-8444-444444444444';
   const outputAssetIds: Uuid[] = [];
   // 桩 JobRepository：固定 jobId，getOutputs 返回注册的资产 id（ordinal 递增）
@@ -200,7 +200,6 @@ test('GET /api/jobs/:jobId returns succeeded outputs with signed URLs', async ()
       throw new Error('not used');
     },
   };
-  const uploads = new InMemoryUploadRepository();
 
   await withServer(async ({ baseUrl }) => {
     // 1) 注册一个真实资产：presign → complete（InMemory 模式无需真实 PUT）
@@ -221,18 +220,16 @@ test('GET /api/jobs/:jobId returns succeeded outputs with signed URLs', async ()
     assert.equal(complete.status, 200);
     outputAssetIds.push(complete.body.assetId);
 
-    // 2) GET /api/jobs/:id 应返回 outputs（含签名 URL）
+    // 2) GET /api/jobs/:id 返回有序引用（仅 assetId + ordinal，不内嵌签名 URL）
     const { status, body } = await jsonFetch(`${baseUrl}/api/jobs/${JOB_ID}`);
     assert.equal(status, 200);
     assert.equal(body.job.id, JOB_ID);
     assert.equal(body.job.status, 'succeeded');
-    assert.equal(body.outputs.length, 1);
-    assert.equal(body.outputs[0].id, complete.body.assetId);
-    assert.equal(body.outputs[0].assetType, 'image');
-    assert.equal(body.outputs[0].mimeType, 'image/png');
-    assert.ok(body.outputs[0].url.includes('fake-download'), `output url should be a signed URL: ${body.outputs[0].url}`);
-    assert.ok(Date.parse(body.outputs[0].expiresAt) > Date.now());
-  }, { jobRepository: stubJobs, uploadRepository: uploads });
+    assert.deepEqual(body.outputs, [
+      { assetId: complete.body.assetId, ordinal: 0 },
+    ], 'outputs must be ordered references without signed URLs');
+    assert.equal(body.outputs[0].url, undefined, 'must not embed signed URL in job response');
+  }, { jobRepository: stubJobs });
 });
 
 test('GET /api/jobs/:jobId unknown returns 404', async () => {

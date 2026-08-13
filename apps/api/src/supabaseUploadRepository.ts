@@ -299,27 +299,6 @@ export class SupabaseUploadRepository implements UploadRepository {
     return this.toAsset(rows[0], authorization);
   }
 
-  async getAssets(assetIds: string[], authorization?: string): Promise<Asset[]> {
-    if (assetIds.length === 0) {
-      return [];
-    }
-    if (!authorization) {
-      throw new UnauthorizedError('Authorization is required to read assets');
-    }
-
-    // PostgREST in 过滤器：id=in.(uuid1,uuid2,...)；按入参顺序对齐返回（签名逐个签发）
-    const idList = assetIds.map((id) => encodeURIComponent(id)).join(',');
-    const rows = await this.fetchAssetRows(`in.(${idList})`, authorization);
-    const byId = new Map(rows.map((row) => [row.id, row]));
-    return Promise.all(assetIds.map((assetId) => {
-      const row = byId.get(assetId);
-      if (!row) {
-        throw new AssetNotFoundError(assetId);
-      }
-      return this.toAsset(row, authorization);
-    }));
-  }
-
   private async fetchAssetRows(
     idFilter: string,
     authorization: string,
