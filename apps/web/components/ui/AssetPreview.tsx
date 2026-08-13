@@ -6,6 +6,7 @@
 
 import { useCallback, useState, useEffect, useRef } from 'react';
 import type { Uuid } from '@tapflow/contracts';
+import { isMediaRetryExhausted, nextMediaRetryDelay } from '@/lib/jobs/mediaRetry';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? '';
 
@@ -48,13 +49,12 @@ function AssetPreviewForAsset({ assetId }: AssetPreviewProps) {
   }, [assetId]);
 
   const handleMediaError = () => {
-    const MAX_RETRIES = 3;
-    if (retryCountRef.current >= MAX_RETRIES) {
+    if (isMediaRetryExhausted(retryCountRef.current)) {
       setError('加载失败，已达最大重试次数');
       return;
     }
     retryCountRef.current += 1;
-    const delay = Math.min(1000 * retryCountRef.current, 5000);
+    const delay = nextMediaRetryDelay(retryCountRef.current);
     retryTimerRef.current = setTimeout(() => {
       retryTimerRef.current = null;
       void fetchAsset();

@@ -8,6 +8,7 @@ import { useJobs } from '@/lib/hooks/useJobs';
 import CreateJobForm from '@/components/ui/CreateJobForm';
 import type { Job, Uuid, JobType, JobOutputRef } from '@tapflow/contracts';
 import { createRetryController } from '@/lib/jobs/retryController';
+import { createSucceededJobGuard } from '@/lib/jobs/successDedupe';
 
 interface JobsPanelProps {
   projectId: string | null;
@@ -17,8 +18,7 @@ interface JobsPanelProps {
 
 export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps) {
   const { jobs, loading, error, createJob, listJobs, getJob, cancelJob, startPolling, stopPolling } = useJobs(projectId);
-  const succeededJobsRef = useRef<Set<Uuid>>(new Set());
-  const fetchingSucceededJobsRef = useRef<Set<Uuid>>(new Set());
+  const succeededJobGuard = useRef(createSucceededJobGuard()).current;
   // 首次加载完成前不触发成功回调：已 succeeded 的历史任务节点已在画布快照中，
   // 重新回调会重复落节点（刷新页面即可复现）。
   const [hydrated, setHydrated] = useState(false);
@@ -31,7 +31,7 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
       const existing = await listJobs();
       if (cancelled) return;
       existing.forEach((job) => {
-        if (job.status === 'succeeded') succeededJobsRef.current.add(job.id);
+        if (job.status === 'succeeded') succeededJobGuard.complete(job.id);
       });
       setHydrated(true);
     })();
@@ -55,16 +55,16 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
     jobs.forEach((job) => {
       if (
         job.status === 'succeeded' &&
-        !succeededJobsRef.current.has(job.id) &&
-        !fetchingSucceededJobsRef.current.has(job.id)
+        succeededJobGuard.shouldProcess(job.id)
       ) {
-        fetchingSucceededJobsRef.current.add(job.id);
+        succeededJobGuard.claim(job.id);
         // 先调 getJob 拿 outputs，成功后才登记去重和回调
         void getJob(job.id).then((result) => {
-          fetchingSucceededJobsRef.current.delete(job.id);
           if (result) {
-            succeededJobsRef.current.add(job.id);
+            succeededJobGuard.complete(job.id);
             onJobSucceeded(result.job, result.outputs);
+          } else {
+            succeededJobGuard.release(job.id);
           }
         });
       }
