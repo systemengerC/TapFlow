@@ -12,7 +12,7 @@
     "check": "npm run typecheck && npm run lint && npm run build"
   },
   "dependencies": {
-    "@tapflow/contracts": "*",
+    "@tapflow/contracts": "workspace:*",
     "@xyflow/react": "^12.11.2",
     "leafer-ui": "^2.2.9",
     "next": "16.3.0",

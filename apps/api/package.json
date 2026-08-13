@@ -11,7 +11,7 @@
     "check": "npm run test && npm run typecheck"
   },
   "dependencies": {
-    "@tapflow/contracts": "*"
+    "@tapflow/contracts": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

@@ -18,6 +18,7 @@ import {
   ErrorResponseSchema,
   type CreateJobRequest,
   type Job,
+  type JobOutputRef,
   type Uuid,
 } from '@tapflow/contracts';
 
@@ -109,7 +110,7 @@ export function useJobs(projectId: string | null) {
   }, [projectId]);
 
   /** 获取单个 Job 详情 */
-  const getJob = useCallback(async (jobId: Uuid): Promise<Job | null> => {
+  const getJob = useCallback(async (jobId: Uuid): Promise<{ job: Job; outputs: JobOutputRef[] } | null> => {
     setError(null);
     try {
       const res = await fetch(`${API_BASE}/api/jobs/${jobId}`);
@@ -119,9 +120,9 @@ export function useJobs(projectId: string | null) {
       if (!parsed.success) {
         throw new Error(`响应契约错误: ${parsed.error.issues[0]?.message}`);
       }
-      const { job } = parsed.data;
+      const { job, outputs } = parsed.data;
       setJobs((prev) => ({ ...prev, [job.id]: job }));
-      return job;
+      return { job, outputs };
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       return null;
@@ -167,13 +168,13 @@ export function useJobs(projectId: string | null) {
       if (pollingTimers.current[jobId]) return; // 已在轮询
 
       const poll = async () => {
-        const job = await getJob(jobId);
-        if (!job) {
+        const result = await getJob(jobId);
+        if (!result) {
           stopPolling(jobId);
           return;
         }
         // 终态：停止轮询
-        if (['succeeded', 'failed', 'cancelled'].includes(job.status)) {
+        if (['succeeded', 'failed', 'cancelled'].includes(result.job.status)) {
           stopPolling(jobId);
         }
       };

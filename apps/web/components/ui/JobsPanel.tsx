@@ -6,17 +6,17 @@
 import { useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { useJobs } from '@/lib/hooks/useJobs';
 import CreateJobForm from '@/components/ui/CreateJobForm';
-import type { Job, Uuid, JobType } from '@tapflow/contracts';
+import type { Job, Uuid, JobType, JobOutputRef } from '@tapflow/contracts';
 import { createRetryController } from '@/lib/jobs/retryController';
 
 interface JobsPanelProps {
   projectId: string | null;
   /** Job 成功后回调，调用方负责在画布上创建输出节点 */
-  onJobSucceeded: (job: Job) => void;
+  onJobSucceeded: (job: Job, outputs: JobOutputRef[]) => void;
 }
 
 export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps) {
-  const { jobs, loading, error, createJob, listJobs, cancelJob, startPolling, stopPolling } = useJobs(projectId);
+  const { jobs, loading, error, createJob, listJobs, getJob, cancelJob, startPolling, stopPolling } = useJobs(projectId);
   const succeededJobsRef = useRef<Set<Uuid>>(new Set());
   // 首次加载完成前不触发成功回调：已 succeeded 的历史任务节点已在画布快照中，
   // 重新回调会重复落节点（刷新页面即可复现）。
@@ -54,10 +54,15 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
     jobs.forEach((job) => {
       if (job.status === 'succeeded' && !succeededJobsRef.current.has(job.id)) {
         succeededJobsRef.current.add(job.id);
-        onJobSucceeded(job);
+        // 异步获取 outputs 后再回调
+        void getJob(job.id).then((result) => {
+          if (result) {
+            onJobSucceeded(result.job, result.outputs);
+          }
+        });
       }
     });
-  }, [hydrated, jobs, onJobSucceeded]);
+  }, [hydrated, jobs, getJob, onJobSucceeded]);
 
   const handleCreateJob = useCallback(
     async (formData: {

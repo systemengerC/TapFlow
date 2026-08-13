@@ -15,10 +15,13 @@ import Toolbar from '@/components/ui/Toolbar';
 import PropertiesPanel from '@/components/ui/PropertiesPanel';
 import UploadButton from '@/components/ui/UploadButton';
 import JobsPanel from '@/components/ui/JobsPanel';
-import type { ClientOperation, Uuid, AssetType, Job } from '@tapflow/contracts';
+import type { ClientOperation, Uuid, AssetType, Job, JobOutputRef } from '@tapflow/contracts';
 
 // Leafer 只能客户端实例化
 const LeaferCanvas = dynamic(() => import('@/components/canvas/LeaferCanvas'), {
+  ssr: false,
+});
+const NodesOverlay = dynamic(() => import('@/components/canvas/NodesOverlay'), {
   ssr: false,
 });
 
@@ -105,7 +108,7 @@ export default function WorkspaceClient() {
 
   // Job 成功 → 落一个 generation_job 节点承载输出
   const handleJobSucceeded = useCallback(
-    (job: Job) => {
+    (job: Job, outputs: JobOutputRef[]) => {
       const op: ClientOperation = {
         type: 'create_node',
         operationId: crypto.randomUUID() as Uuid,
@@ -113,7 +116,12 @@ export default function WorkspaceClient() {
           nodeType: 'generation_job',
           position: { x: 480, y: 120 },
           size: { x: 320, y: 240 },
-          data: { jobId: job.id, jobType: job.jobType, model: job.model },
+          data: {
+            jobId: job.id,
+            jobType: job.jobType,
+            model: job.model,
+            assetIds: outputs.map((o) => o.assetId),
+          },
           parentNodeId: null,
         },
       };
@@ -175,6 +183,9 @@ export default function WorkspaceClient() {
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
       {/* 画布层 */}
       <LeaferCanvas onCanvasClick={handleCanvasClick} onCanvasEmpty={handleCanvasEmpty} />
+
+      {/* 节点覆盖层（媒体预览） */}
+      <NodesOverlay />
 
       {/* DOM Overlay 层 */}
       <Toolbar project={project} saving={flushing} saveError={saveError} onSave={flush}>
