@@ -4,7 +4,7 @@
  */
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import type { Uuid } from '@tapflow/contracts';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? '';
@@ -23,7 +23,7 @@ interface Asset {
   height?: number;
 }
 
-export default function AssetPreview({ assetId }: AssetPreviewProps) {
+function AssetPreviewForAsset({ assetId }: AssetPreviewProps) {
   const [asset, setAsset] = useState<Asset | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -31,9 +31,7 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
   const retryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef(true);
 
-  const fetchAsset = async () => {
-    setLoading(true);
-    setError(null);
+  const fetchAsset = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/assets/${assetId}`);
       if (!res.ok) {
@@ -45,9 +43,9 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
     } catch (e) {
       if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
-  };
+  }, [assetId]);
 
   const handleMediaError = () => {
     const MAX_RETRIES = 3;
@@ -66,15 +64,18 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
   useEffect(() => {
     mountedRef.current = true;
     retryCountRef.current = 0;
-    void fetchAsset();
+    const initialFetchTimer = setTimeout(() => {
+      void fetchAsset();
+    }, 0);
     return () => {
       mountedRef.current = false;
+      clearTimeout(initialFetchTimer);
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
     };
-  }, [assetId]);
+  }, [fetchAsset]);
 
   if (loading) {
     return (
@@ -131,6 +132,8 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
 
   if (asset.assetType === 'image') {
     return (
+      // Signed asset URLs are dynamic and cannot be declared as a Next Image remote pattern.
+      // eslint-disable-next-line @next/next/no-img-element
       <img
         src={asset.url}
         alt="生成的图片"
@@ -173,4 +176,8 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
       不支持的资产类型：{asset.assetType}
     </div>
   );
+}
+
+export default function AssetPreview({ assetId }: AssetPreviewProps) {
+  return <AssetPreviewForAsset key={assetId} assetId={assetId} />;
 }
