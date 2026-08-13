@@ -13,13 +13,13 @@ Last reviewed: 2026-08-12 (gpt integration review)
 | Web retry and duplicate-submit protection | Done | `retryController` deduplicates in-flight retries by job ID, clears stale errors, and rebuilds requests without the old idempotency key. Covered by controller and `JobCard` tests. |
 | Web single/multi-node deletion | Done | Shared delete helper removes selected nodes and dangling edges; `PropertiesPanelView` exposes single/multi-delete UI and interaction tests. |
 | Persistent asset URL / media preview | Blocked | Backend contract does not yet expose a persistent asset URL or `GET /api/assets/:id`; do not mark complete until that contract exists. |
-| Release gates | Passed locally; push pending | Web: 44/44 tests, typecheck, lint, production build. API: 64/64 tests, typecheck. Worker: 24/24 tests, typecheck. Real PG closure: 26 PASS. Commit-level review found and fixed signed upload response/auth headers. |
+| Release gates | Passed and pushed | Web: 44/44 tests, typecheck, lint, production build. API: 64/64 tests, typecheck. Worker: 24/24 tests, typecheck. Real PG closure: 26 PASS. Commit-level review found and fixed signed upload response/auth headers. |
 
 ## Verified Git State At Review
 
 - Branch: `main`
-- Ahead of `origin/main`: 6 commits (unpushed before this progress update).
-- Working tree: clean before this progress update; backend and Web lanes are committed separately.
+- Local `main` matches `origin/main` at `c6a0d2490033d4440317ec8292b07eb78157906d`.
+- Working tree: clean; backend and Web lanes are committed separately and pushed.
 - Relevant commits: `77770bd` backend/worker/Supabase closure, `c5ecce6` upload signing/auth follow-up, `c77a181` Web retry/delete regression coverage.
 
 ## Verified Test Evidence (backend lane, 2026-08-12)
@@ -37,4 +37,4 @@ Last reviewed: 2026-08-12 (gpt integration review)
 4. [x] Finish Web retry/delete regression coverage and run Web checks.
 5. [ ] Implement persistent asset URL/API and media preview after the backend contract is available (blocked).
 6. [x] Run repository release gates and inspect final diffs.
-7. [ ] Push reviewed commits to `origin/main`.
+7. [x] Push reviewed commits to `origin/main`.
