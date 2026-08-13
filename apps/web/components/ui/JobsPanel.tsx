@@ -38,7 +38,7 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
     return () => {
       cancelled = true;
     };
-  }, [projectId, listJobs]);
+  }, [projectId, listJobs, succeededJobGuard]);
 
   // 对所有 queued/running 的任务自动开轮询
   useEffect(() => {
@@ -69,7 +69,7 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
         });
       }
     });
-  }, [hydrated, jobs, getJob, onJobSucceeded]);
+  }, [hydrated, jobs, getJob, onJobSucceeded, succeededJobGuard]);
 
   const handleCreateJob = useCallback(
     async (formData: {
