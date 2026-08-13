@@ -18,6 +18,7 @@ interface JobsPanelProps {
 export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps) {
   const { jobs, loading, error, createJob, listJobs, getJob, cancelJob, startPolling, stopPolling } = useJobs(projectId);
   const succeededJobsRef = useRef<Set<Uuid>>(new Set());
+  const fetchingSucceededJobsRef = useRef<Set<Uuid>>(new Set());
   // 首次加载完成前不触发成功回调：已 succeeded 的历史任务节点已在画布快照中，
   // 重新回调会重复落节点（刷新页面即可复现）。
   const [hydrated, setHydrated] = useState(false);
@@ -52,9 +53,15 @@ export default function JobsPanel({ projectId, onJobSucceeded }: JobsPanelProps)
   useEffect(() => {
     if (!hydrated) return;
     jobs.forEach((job) => {
-      if (job.status === 'succeeded' && !succeededJobsRef.current.has(job.id)) {
+      if (
+        job.status === 'succeeded' &&
+        !succeededJobsRef.current.has(job.id) &&
+        !fetchingSucceededJobsRef.current.has(job.id)
+      ) {
+        fetchingSucceededJobsRef.current.add(job.id);
         // 先调 getJob 拿 outputs，成功后才登记去重和回调
         void getJob(job.id).then((result) => {
+          fetchingSucceededJobsRef.current.delete(job.id);
           if (result) {
             succeededJobsRef.current.add(job.id);
             onJobSucceeded(result.job, result.outputs);

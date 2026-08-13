@@ -15,6 +15,7 @@ import {
   ListProjectsResponseSchema,
   CreateProjectRequestSchema,
   CreateProjectResponseSchema,
+  GetJobResponseSchema,
   ErrorResponseSchema,
   type Project,
 } from '@tapflow/contracts';
@@ -75,20 +76,25 @@ export function useProject() {
             (n) =>
               n.nodeType === 'generation_job' &&
               typeof (n.data as { jobId?: string })?.jobId === 'string' &&
-              (!(n.data as { assetIds?: string[] })?.assetIds || (n.data as { assetIds?: string[] }).assetIds.length === 0)
+              ((n.data as { assetIds?: string[] })?.assetIds?.length ?? 0) === 0
           )
           .map(async (node) => {
             try {
               const jobId = (node.data as { jobId: string }).jobId;
               const res = await fetch(`${API_BASE}/api/jobs/${jobId}`);
               if (!res.ok) return;
-              const data = await res.json();
-              const outputs = data.outputs as { assetId: string; ordinal: number }[] | undefined;
-              if (outputs && outputs.length > 0) {
+              const parsedJob = GetJobResponseSchema.safeParse(await res.json());
+              if (!parsedJob.success || parsedJob.data.outputs.length === 0) return;
+              const outputs = parsedJob.data.outputs;
+              if (outputs.length > 0) {
                 // 更新节点 data，补上 assetIds
-                useNodesStore.getState().updateNodeData(node.id, {
-                  ...(node.data as object),
-                  assetIds: outputs.map((o) => o.assetId),
+                useNodesStore.getState().applyLocal({
+                  type: 'update_node',
+                  operationId: crypto.randomUUID() as import('@tapflow/contracts').Uuid,
+                  payload: {
+                    nodeId: node.id,
+                    patch: { assetIds: outputs.map((o) => o.assetId) },
+                  },
                 });
               }
             } catch {

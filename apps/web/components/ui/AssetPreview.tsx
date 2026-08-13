@@ -29,6 +29,7 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
   const [error, setError] = useState<string | null>(null);
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const mountedRef = useRef(true);
 
   const fetchAsset = async () => {
     setLoading(true);
@@ -39,10 +40,10 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
         throw new Error(`HTTP ${res.status}`);
       }
       const data = await res.json();
+      if (!mountedRef.current) return;
       setAsset(data.asset);
-      retryCountRef.current = 0;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -63,9 +64,11 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     retryCountRef.current = 0;
     void fetchAsset();
     return () => {
+      mountedRef.current = false;
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
@@ -106,7 +109,10 @@ export default function AssetPreview({ assetId }: AssetPreviewProps) {
       >
         <div>加载失败：{error || '未知错误'}</div>
         <button
-          onClick={() => void fetchAsset()}
+          onClick={() => {
+            retryCountRef.current = 0;
+            void fetchAsset();
+          }}
           style={{
             padding: '6px 12px',
             background: '#2a2a36',
